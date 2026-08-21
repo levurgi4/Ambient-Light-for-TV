@@ -1,0 +1,21 @@
+# The first hardware target is the ESP32-WROOM-32D.
+CONFIG_IDF_TARGET="esp32"
+
+# UART0 is the binary Ambilight transport. Application logs must never corrupt it.
+# The ESP32 ROM can still emit a short 115200-baud boot message before app_main().
+CONFIG_ESP_CONSOLE_NONE=y
+CONFIG_LOG_DEFAULT_LEVEL_NONE=y
+CONFIG_LOG_MAXIMUM_EQUALS_DEFAULT=y
+
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_COMPILER_CXX_EXCEPTIONS=n
+CONFIG_COMPILER_CXX_RTTI=n
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
+
+# Physical LED output for the assembled prototype. GPIO18 is connected to DI
+# through the agreed 330-470 ohm series resistor and shares GND with the strip.
+CONFIG_AMBILIGHT_LED_DATA_GPIO=18
+
+# Keep the initial image simple and offline: no managed components or network stack.
+CONFIG_PARTITION_TABLE_SINGLE_APP=y

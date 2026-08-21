@@ -1,0 +1,111 @@
+{
+  "version": 5,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-msvc",
+      "hidden": true,
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "environment": {
+        "QT_ROOT": "C:/Qt/6.10.3/msvc2022_64"
+      },
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "$env{QT_ROOT}",
+        "BUILD_TESTING": "ON",
+        "AMBILIGHT_BUILD_DESKTOP": "ON"
+      }
+    },
+    {
+      "name": "windows-debug",
+      "displayName": "Windows Debug (MSVC 2022 + Qt 6)",
+      "inherits": "windows-msvc"
+    },
+    {
+      "name": "windows-release",
+      "displayName": "Windows Release (MSVC 2022 + Qt 6)",
+      "inherits": "windows-msvc"
+    },
+    {
+      "name": "protocol-only",
+      "displayName": "Portable protocol tests only",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "AMBILIGHT_BUILD_DESKTOP": "OFF",
+        "BUILD_TESTING": "ON"
+      }
+    },
+    {
+      "name": "protocol-windows",
+      "displayName": "Windows protocol tests (MSVC 2022)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "AMBILIGHT_BUILD_DESKTOP": "OFF",
+        "BUILD_TESTING": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-debug",
+      "configurePreset": "windows-debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "windows-release",
+      "configurePreset": "windows-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "protocol-only",
+      "configurePreset": "protocol-only"
+    },
+    {
+      "name": "protocol-windows",
+      "configurePreset": "protocol-windows",
+      "configuration": "Debug"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-debug",
+      "configurePreset": "windows-debug",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-release",
+      "configurePreset": "windows-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "protocol-only",
+      "configurePreset": "protocol-only",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "protocol-windows",
+      "configurePreset": "protocol-windows",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

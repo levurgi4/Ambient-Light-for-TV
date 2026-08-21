@@ -1,0 +1,32 @@
+# CMake and IDE output
+/out/
+/build/
+/desktop/build*/
+/cmake-build-*/
+/.vs/
+/.vscode/
+CMakeUserPresets.json
+*.obj
+
+# ESP-IDF generated files
+/firmware/build*/
+/firmware/sdkconfig
+/firmware/sdkconfig.old
+/firmware/dependencies.lock
+/firmware/managed_components/
+
+# Qt deployment output
+*.user
+*.autosave
+*.qm
+
+# Runtime and diagnostics
+*.log
+*.dmp
+
+# Local marketplace photos
+/ESP_PHOTO/
+
+# Windows metadata
+Thumbs.db
+Desktop.ini

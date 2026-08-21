@@ -1,0 +1,41 @@
+menu "Ambilight hardware"
+
+config AMBILIGHT_LED_DATA_GPIO
+    int "WS2815 data GPIO (-1 disables physical output)"
+    range -1 33
+    default -1
+    help
+        GPIO connected to the input of the external 3.3 V to 5 V level
+        shifter that drives WS2815 DIN. Leave this at -1 until the wiring is
+        confirmed: the firmware then uses a strict no-op output and does not
+        configure any LED GPIO.
+
+        The firmware accepts only this conservative ESP32-WROOM-32D allow-list:
+        16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33. UART0, flash,
+        input-only and boot-strapping pins are deliberately excluded.
+
+choice AMBILIGHT_WS2815_TIMING_PROFILE
+    prompt "WS2815 timing profile"
+    default AMBILIGHT_WS2815_TIMING_CLASSIC
+    help
+        Select the data-bit timing required by the exact strip revision.
+        Classic and revised WS2815B-V1 parts require incompatible T1 low
+        times. If the strip is only labelled WS2815, keep Classic until its
+        controller/datasheet is identified or the signal is checked with an
+        oscilloscope.
+
+config AMBILIGHT_WS2815_TIMING_CLASSIC
+    bool "Classic WS2815 / early WS2815B"
+    help
+        0 = 250 ns high + 1000 ns low.
+        1 = 1000 ns high + 250 ns low.
+
+config AMBILIGHT_WS2815_TIMING_B_V1_REVISED
+    bool "Revised WS2815B-V1"
+    help
+        0 = 250 ns high + 1000 ns low.
+        1 = 750 ns high + 625 ns low.
+
+endchoice
+
+endmenu
