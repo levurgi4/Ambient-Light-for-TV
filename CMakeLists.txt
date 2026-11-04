@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
     AmbilightByLevurgi4
-    VERSION 0.2.8
+    VERSION 0.2.9
     DESCRIPTION "Low-latency Ambilight controller for Windows and ESP32"
     LANGUAGES CXX
 )

@@ -358,7 +358,7 @@ void SampleEdge(uint resultIndex)
     }
 
     const uint alongSamples = 4;
-    const uint depthSamples = min(32u, max(8u, DepthSampleCount));
+    const uint depthSamples = min(32u, max(4u, DepthSampleCount));
     const uint sampleCount = alongSamples * depthSamples;
     const uint rootMeanSquareMode = 1;
     const uint dominantMode = 2;
@@ -1293,7 +1293,6 @@ public:
             captured.error = result;
             return captured;
         }
-        context_->CopyResource(sampleTexture_.Get(), desktopTexture.Get());
 
         const bool quarterTurn =
             duplicationDescription_.Rotation == DXGI_MODE_ROTATION_ROTATE90
@@ -1309,6 +1308,26 @@ public:
             return captured;
         }
         captured.frameSize = {logicalWidth, logicalHeight};
+
+        if (configuration.gamingMode
+            && configuration.blackBarDetectionMode == BlackBarDetectionMode::Off) {
+            const int depth = resolvedSamplingDepthPixels(
+                captured.frameSize, {}, configuration.samplingDepthPixels);
+            const auto regions = perimeterCopyRegions(
+                {static_cast<int>(sourceDescription.Width),
+                    static_cast<int>(sourceDescription.Height)}, depth);
+            for (const QRect& region : regions) {
+                const D3D11_BOX box{
+                    static_cast<UINT>(region.x()),
+                    static_cast<UINT>(region.y()), 0,
+                    static_cast<UINT>(region.x() + region.width()),
+                    static_cast<UINT>(region.y() + region.height()), 1};
+                context_->CopySubresourceRegion(sampleTexture_.Get(), 0,
+                    box.left, box.top, 0, desktopTexture.Get(), 0, &box);
+            }
+        } else {
+            context_->CopyResource(sampleTexture_.Get(), desktopTexture.Get());
+        }
 
         ShaderParameters parameters =
             makeParameters(configuration, sourceDescription, captured.frameSize);
@@ -1358,7 +1377,7 @@ public:
                 captured.contentInsets,
                 configuration.samplingDepthPixels));
         parameters.depthSampleCount = static_cast<UINT>(
-            adaptiveDepthSampleCount(
+            configuration.gamingMode ? kGamingDepthSamples : adaptiveDepthSampleCount(
                 static_cast<int>(parameters.samplingDepth)));
         parameters.mode = 1;
         parameters.resultCount =

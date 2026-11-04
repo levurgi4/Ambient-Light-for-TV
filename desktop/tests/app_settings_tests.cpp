@@ -24,6 +24,7 @@ bool testDefaults()
         && expect(settings.screenHeight == 2160, "default screen height")
         && expect(settings.captureOutputId.isEmpty(), "default capture output")
         && expect(settings.targetFps == 60, "default target frame rate")
+        && expect(!settings.gamingMode, "existing installations keep normal capture")
         && expect(settings.automaticSamplingDepth, "default automatic sampling depth")
         && expect(settings.samplingDepthPixels == 120, "default manual sampling depth")
         && expect(settings.regionColorMode == QStringLiteral("mean"),
@@ -193,6 +194,7 @@ bool testRoundTrip()
     original.screenHeight = 1440;
     original.captureOutputId = QStringLiteral("dxgi:1:0");
     original.targetFps = 120;
+    original.gamingMode = true;
     original.samplingZones = 256;
     original.automaticSamplingDepth = false;
     original.samplingDepthPixels = 144;
@@ -252,6 +254,7 @@ bool testRoundTrip()
         && expect(restored.captureOutputId == original.captureOutputId,
             "capture output round trip")
         && expect(restored.targetFps == original.targetFps, "FPS round trip")
+        && expect(restored.gamingMode, "game mode survives restart")
         && expect(restored.samplingZones == original.samplingZones, "zones round trip")
         && expect(
             restored.automaticSamplingDepth

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    project(AmbilightDesktop VERSION 0.2.8 LANGUAGES CXX)
+    project(AmbilightDesktop VERSION 0.2.9 LANGUAGES CXX)
     include(CTest)
 endif()
 

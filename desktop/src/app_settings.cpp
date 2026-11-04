@@ -225,6 +225,7 @@ AppSettings AppSettings::load(QSettings& settings)
     result.screenHeight = valueOr(settings, "height", result.screenHeight);
     result.captureOutputId = valueOr(settings, "outputId", result.captureOutputId);
     result.targetFps = valueOr(settings, "targetFps", result.targetFps);
+    result.gamingMode = valueOr(settings, "gamingMode", result.gamingMode);
     result.samplingZones = valueOr(settings, "samplingZones", result.samplingZones);
     result.automaticSamplingDepth = valueOr(
         settings,
@@ -352,6 +353,7 @@ bool AppSettings::save(QSettings& settings) const
     settings.setValue(QStringLiteral("height"), screenHeight);
     settings.setValue(QStringLiteral("outputId"), captureOutputId);
     settings.setValue(QStringLiteral("targetFps"), targetFps);
+    settings.setValue(QStringLiteral("gamingMode"), gamingMode);
     settings.setValue(QStringLiteral("samplingZones"), samplingZones);
     settings.setValue(
         QStringLiteral("automaticSamplingDepth"),

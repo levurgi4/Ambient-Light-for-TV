@@ -260,6 +260,8 @@ private:
     QSpinBox* screenWidthSpin_ = nullptr;
     QSpinBox* screenHeightSpin_ = nullptr;
     QSpinBox* fpsSpin_ = nullptr;
+    QCheckBox* gamingModeCheck_ = nullptr;
+    QLabel* gamingModeHintLabel_ = nullptr;
     QSpinBox* zonesSpin_ = nullptr;
     QComboBox* regionColorModeCombo_ = nullptr;
     QComboBox* ledTransferModeCombo_ = nullptr;

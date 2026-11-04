@@ -600,6 +600,12 @@ void MainWindow::buildScreenTab()
     fpsSpin_->setMaximumWidth(110);
     sourceForm->addRow(fpsLabel_, fpsSpin_);
 
+    gamingModeCheck_ = new QCheckBox(screenSourceGroup_);
+    sourceForm->addRow(QString(), gamingModeCheck_);
+    gamingModeHintLabel_ = new QLabel(screenSourceGroup_);
+    gamingModeHintLabel_->setWordWrap(true);
+    sourceForm->addRow(QString(), gamingModeHintLabel_);
+
     blackBarModeLabel_ = makeFieldLabel(screenSourceGroup_);
     blackBarModeCombo_ = new QComboBox(screenSourceGroup_);
     for (const auto& mode : {QStringLiteral("off"),
@@ -1211,9 +1217,19 @@ void MainWindow::connectSignals()
         });
     }
 
+    connect(gamingModeCheck_, &QCheckBox::toggled, this, [this] {
+        clearCapturedFrame();
+        updateSamplingDepthUi();
+        updateDiagnostics();
+        scheduleCaptureUpdate();
+        scheduleSave();
+    });
+
     for (auto* spin : {fpsSpin_, zonesSpin_, samplingDepthSpin_}) {
         connect(spin, &QSpinBox::valueChanged,
             this, &MainWindow::scheduleCaptureUpdate);
+        connect(spin, &QSpinBox::valueChanged,
+            this, &MainWindow::updateSamplingDepthUi);
     }
     connect(zonesSpin_, &QSpinBox::valueChanged,
         this, &MainWindow::updateSamplingOverlay);
@@ -1656,6 +1672,7 @@ void MainWindow::applySettings(const AppSettings& value)
         screenHeightSpin_->setValue(selectedOutputSize.height());
     }
     fpsSpin_->setValue(value.targetFps);
+    gamingModeCheck_->setChecked(value.gamingMode);
     zonesSpin_->setValue(value.samplingZones);
     selectComboValue(regionColorModeCombo_, value.regionColorMode);
     selectComboValue(ledTransferModeCombo_, value.ledTransferMode);
@@ -1766,6 +1783,7 @@ AppSettings MainWindow::settingsFromUi() const
     value.screenHeight = screenHeightSpin_->value();
     value.captureOutputId = comboValue(captureOutputCombo_);
     value.targetFps = fpsSpin_->value();
+    value.gamingMode = gamingModeCheck_->isChecked();
     value.samplingZones = zonesSpin_->value();
     value.regionColorMode = comboValue(regionColorModeCombo_);
     value.ledTransferMode = comboValue(ledTransferModeCombo_);
@@ -2322,6 +2340,8 @@ void MainWindow::showTabHelp(QWidget* page)
 
 • Capture resolution is detected automatically and is read-only.
 
+• Game mode reduces GPU work: up to 30 FPS, 80 zones and 16 points per zone with mean color. Only the edge strips are copied. Black-bar detection is disabled, so letterboxed games may produce dark top/bottom lighting. Lower FPS and fewer samples reduce smoothness and detail. The depth, LED count, white balance and dark-tone correction remain available. Disabling Game mode restores your normal processing settings. The FPS benefit depends on the game, GPU and Windows capture overhead.
+
 • Processing frame rate is the target upper rate for screen capture and analysis. Actual transport output may be lower. It does not change the monitor refresh rate. Start with 60 FPS for a 60 Hz TV.
 
 • Color zones are logical perimeter regions independent of the LED count. More zones preserve finer local transitions but add a little GPU work. The maximum is 300.
@@ -2344,6 +2364,8 @@ void MainWindow::showTabHelp(QWidget* page)
 • «Экран захвата» определяет, изображение какого дисплея анализировать. «Автоматически» следует за основным экраном Windows; выберите телевизор явно, если он должен работать независимо. Нажмите «Обновить» после подключения или отключения дисплея.
 
 • Разрешение захвата определяется автоматически и не редактируется.
+
+• Игровой режим снижает нагрузку на GPU: до 30 FPS, 80 зон и 16 точек на зону со средним цветом. Копируются только краевые полосы. Поиск чёрных полос отключён: в игре с полосами сверху и снизу подсветка этих сторон может потемнеть. Снижаются плавность и детализация. Глубина, число LED, баланс белого и коррекция тёмных оттенков сохраняются. Выключение игрового режима возвращает обычные параметры обработки. Прирост FPS зависит от игры, видеокарты и расходов захвата Windows.
 
 • Частота обработки — верхняя целевая частота захвата и анализа изображения. Фактическая передача может идти реже. Настройка не изменяет герцовку монитора. Для телевизора 60 Гц начните с 60 FPS.
 
@@ -2682,7 +2704,10 @@ void MainWindow::updateSamplingOverlay()
         .bottom = bottomLedsSpin_->value(),
         .left = leftLedsSpin_->value(),
     };
-    const auto zones = distributeSamplingZones(zonesSpin_->value(), ledLayout);
+    const auto zones = distributeSamplingZones(
+        gamingModeCheck_->isChecked()
+            ? std::min(zonesSpin_->value(), capture::kGamingMaximumZones)
+            : zonesSpin_->value(), ledLayout);
     ledPreview_->setSamplingOverlay(
         zones.top,
         zones.right,
@@ -2695,11 +2720,30 @@ void MainWindow::updateSamplingOverlay()
 
 void MainWindow::updateSamplingDepthUi()
 {
+    const bool gaming = gamingModeCheck_->isChecked();
+    gamingModeCheck_->setText(text("Game mode (lower GPU load)",
+        "Игровой режим (меньше нагрузка на GPU)"));
+    gamingModeHintLabel_->setText(text(
+        "When enabled: up to 30 FPS, 80 zones, 16 points per zone, mean color. "
+        "Only edge strips are copied; black-bar detection is off. "
+        "Motion is less smooth. Your normal settings are preserved.",
+        "При включении: до 30 FPS, 80 зон, 16 точек на зону, средний цвет. "
+        "Копируются только края; поиск чёрных полос отключён. "
+        "Движение менее плавное. Обычные настройки сохраняются."));
+    if (gaming) {
+        gamingModeHintLabel_->setText(gamingModeHintLabel_->text()
+            + text(" Active limits: %1 FPS / %2 zones.",
+                   " Сейчас: максимум %1 FPS / %2 зон.")
+                  .arg(std::min(fpsSpin_->value(), capture::kGamingMaximumFps))
+                  .arg(std::min(zonesSpin_->value(), capture::kGamingMaximumZones)));
+    }
+    blackBarModeCombo_->setEnabled(!gaming);
+    regionColorModeCombo_->setEnabled(!gaming);
     samplingDepthSpin_->setEnabled(!samplingDepthAutoCheck_->isChecked());
     const int effectiveDepth = effectiveSamplingDepthPixels();
     const int depthSamples =
-        capture::adaptiveDepthSampleCount(effectiveDepth);
-    const int uniqueSamples = capture::samplesPerZone(effectiveDepth);
+        gaming ? capture::kGamingDepthSamples : capture::adaptiveDepthSampleCount(effectiveDepth);
+    const int uniqueSamples = capture::kSamplesAlongZone * depthSamples;
     updateRegionColorModeUi();
     updateSamplingOverlay();
     if (samplingDepthAutoCheck_->isChecked()) {
@@ -2743,8 +2787,9 @@ void MainWindow::updateSamplingDepthUi()
 void MainWindow::updateRegionColorModeUi()
 {
     const int uniqueSamples =
-        capture::samplesPerZone(effectiveSamplingDepthPixels());
-    const QString mode = comboValue(regionColorModeCombo_);
+        gamingModeCheck_->isChecked() ? 16 : capture::samplesPerZone(effectiveSamplingDepthPixels());
+    const QString mode = gamingModeCheck_->isChecked()
+        ? QStringLiteral("mean") : comboValue(regionColorModeCombo_);
     QString hint;
     if (mode == QStringLiteral("rms")) {
         hint = text(
@@ -2962,7 +3007,12 @@ void MainWindow::updateDiagnostics()
                "Источник: %1 × %2; цель %3 FPS")
                .arg(sourceSize.width())
                .arg(sourceSize.height())
-               .arg(fpsSpin_->value())
+               .arg(gamingModeCheck_->isChecked()
+                    ? std::min(fpsSpin_->value(), capture::kGamingMaximumFps)
+                    : fpsSpin_->value())
+        << text("Game mode: %1", "Игровой режим: %1")
+               .arg(gamingModeCheck_->isChecked()
+                    ? text("enabled", "включён") : text("disabled", "выключен"))
         << text("Measured: %1 FPS; GPU/readback %2 ms; frame %3",
                "Измерено: %1 FPS; GPU/чтение %2 мс; кадр %3")
                .arg(measuredCaptureFps_, 0, 'f', 1)
@@ -2975,14 +3025,20 @@ void MainWindow::updateDiagnostics()
                .arg(capturedContentInsets_.right())
                .arg(capturedContentInsets_.bottom())
         << text("Black bars: %1", "Чёрные полосы: %1")
-               .arg(blackBarModeCombo_->currentText())
+               .arg(gamingModeCheck_->isChecked()
+                    ? text("off (game mode)", "отключено (игровой режим)")
+                    : blackBarModeCombo_->currentText())
         << text("GPU sampling zones: %1", "Зоны выборки GPU: %1")
-               .arg(zonesSpin_->value())
+               .arg(gamingModeCheck_->isChecked()
+                    ? std::min(zonesSpin_->value(), capture::kGamingMaximumZones)
+                    : zonesSpin_->value())
         << text(
                "Region processing: %1; %2 source points per zone",
                "Обработка области: %1; %2 исходных точек на зону")
-               .arg(regionColorModeCombo_->currentText())
-               .arg(capture::samplesPerZone(
+               .arg(gamingModeCheck_->isChecked()
+                    ? text("Mean (game mode)", "Среднее (игровой режим)")
+                    : regionColorModeCombo_->currentText())
+               .arg(gamingModeCheck_->isChecked() ? 16 : capture::samplesPerZone(
                    effectiveSamplingDepthPixels()))
         << text("Dark-tone transfer: %1", "Передача тёмных оттенков: %1")
                .arg(ledTransferModeCombo_->currentText())
@@ -4208,8 +4264,10 @@ void MainWindow::updateCaptureConfiguration()
         .bottom = bottomLedsSpin_->value(),
         .left = leftLedsSpin_->value(),
     };
-    const auto samplingLayout =
-        distributeSamplingZones(zonesSpin_->value(), ledLayout);
+    const bool gaming = gamingModeCheck_->isChecked();
+    const auto samplingLayout = distributeSamplingZones(
+        gaming ? std::min(zonesSpin_->value(), capture::kGamingMaximumZones)
+               : zonesSpin_->value(), ledLayout);
 
     capture::CaptureConfiguration configuration;
     configuration.outputId = comboValue(captureOutputCombo_);
@@ -4217,15 +4275,18 @@ void MainWindow::updateCaptureConfiguration()
     configuration.rightLedCount = samplingLayout.right;
     configuration.bottomLedCount = samplingLayout.bottom;
     configuration.leftLedCount = samplingLayout.left;
-    configuration.targetFps = fpsSpin_->value();
-    configuration.blackBarDetectionMode = captureBlackBarDetectionMode(
-        comboValue(blackBarModeCombo_));
+    configuration.gamingMode = gaming;
+    configuration.targetFps = gaming
+        ? std::min(fpsSpin_->value(), capture::kGamingMaximumFps) : fpsSpin_->value();
+    configuration.blackBarDetectionMode = gaming
+        ? capture::BlackBarDetectionMode::Off
+        : captureBlackBarDetectionMode(comboValue(blackBarModeCombo_));
     configuration.samplingDepthPixels =
         samplingDepthAutoCheck_->isChecked()
         ? 0
         : samplingDepthSpin_->value();
-    configuration.regionColorMode =
-        captureRegionColorMode(comboValue(regionColorModeCombo_));
+    configuration.regionColorMode = gaming ? capture::RegionColorMode::Mean
+        : captureRegionColorMode(comboValue(regionColorModeCombo_));
     configuration.ledTransferMode =
         captureLedTransferMode(comboValue(ledTransferModeCombo_));
 

@@ -16,6 +16,7 @@ struct AppSettings final {
     int screenHeight = 2160;
     QString captureOutputId;
     int targetFps = 60;
+    bool gamingMode = false;
     int samplingZones = 300;
     bool automaticSamplingDepth = true;
     int samplingDepthPixels = 120;

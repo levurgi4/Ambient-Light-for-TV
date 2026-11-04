@@ -18,6 +18,28 @@ inline constexpr int kSamplesAlongZone = 4;
 inline constexpr int kMinimumDepthSamples = 8;
 inline constexpr int kMaximumDepthSamples = 32;
 inline constexpr int kTargetDepthSampleSpacingPixels = 16;
+inline constexpr int kGamingMaximumFps = 30;
+inline constexpr int kGamingMaximumZones = 80;
+inline constexpr int kGamingDepthSamples = 4;
+
+// Non-overlapping border strips in physical texture coordinates. Copying all
+// four edges also covers rotated displays without reading an uncopied center.
+[[nodiscard]] inline QVector<QRect> perimeterCopyRegions(
+    const QSize& size, const int depth)
+{
+    if (size.width() < 1 || size.height() < 1) {
+        return {};
+    }
+    const int d = std::max(1, depth);
+    if (d >= (std::min(size.width(), size.height()) + 1) / 2) {
+        return {QRect(QPoint(0, 0), size)};
+    }
+    return {
+        {0, 0, size.width(), d},
+        {0, size.height() - d, size.width(), d},
+        {0, d, d, size.height() - 2 * d},
+        {size.width() - d, d, d, size.height() - 2 * d}};
+}
 
 enum class RegionColorMode : quint8 {
     Mean = 0,
@@ -190,6 +212,7 @@ struct CaptureConfiguration final {
     int leftLedCount = 54;
 
     int targetFps = 60;
+    bool gamingMode = false;
     BlackBarDetectionMode blackBarDetectionMode =
         BlackBarDetectionMode::FirstContent;
 

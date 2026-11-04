@@ -421,11 +421,53 @@ bool testAutomaticPrimaryTransition()
             "transient empty enumeration does not tear down capture");
 }
 
+bool testGamingPerimeterCopies()
+{
+    using ambilight::capture::perimeterCopyRegions;
+    // Exhaustive small surfaces cover portrait/landscape, odd dimensions,
+    // overlapping borders, and depths larger than the entire frame.
+    for (int width = 1; width <= 17; ++width) {
+        for (int height = 1; height <= 17; ++height) {
+            for (int depth = 1; depth <= 20; ++depth) {
+                const auto regions = perimeterCopyRegions({width, height}, depth);
+                const QRect bounds(0, 0, width, height);
+                for (const auto& region : regions) {
+                    if (!expect(!region.isEmpty() && bounds.contains(region),
+                            "copy boxes must stay inside the source/destination")) {
+                        return false;
+                    }
+                }
+                for (int y = 0; y < height; ++y) {
+                    for (int x = 0; x < width; ++x) {
+                        int copies = 0;
+                        for (const auto& region : regions) {
+                            copies += region.contains(x, y) ? 1 : 0;
+                        }
+                        const bool edge = x < depth || y < depth
+                            || x >= width - depth || y >= height - depth;
+                        if (!expect(copies == (edge ? 1 : 0),
+                                "every sampled border pixel is copied once; center is skipped")) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    qint64 pixels = 0;
+    for (const auto& region : perimeterCopyRegions({3840, 2160}, 120)) {
+        pixels += static_cast<qint64>(region.width()) * region.height();
+    }
+    return expect(pixels == 1'382'400, "4K auto-depth copies one sixth of the full frame")
+        && expect(perimeterCopyRegions({}, 120).isEmpty(), "invalid surface is not copied");
+}
+
 } // namespace
 
 int main()
 {
     const bool success = testValidConfigurationAndLayout()
+        && testGamingPerimeterCopies()
         && testLedBoundaries()
         && testFpsBoundaries()
         && testNonFiniteFloatFields()
