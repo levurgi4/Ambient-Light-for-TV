@@ -69,6 +69,8 @@ void AppSettings::normalize()
     }
     hotkey = hotkey.trimmed();
     captureOutputId = captureOutputId.trimmed();
+    mirrorOutputId = mirrorOutputId.trimmed();
+    mirrorFps = std::clamp(mirrorFps, 15, 60);
     audioOutputDeviceId = audioOutputDeviceId.trimmed();
     audioInputDeviceId = audioInputDeviceId.trimmed();
 
@@ -98,6 +100,10 @@ void AppSettings::normalize()
     screenWidth = std::clamp(screenWidth, 320, 16'384);
     screenHeight = std::clamp(screenHeight, 240, 16'384);
     targetFps = std::clamp(targetFps, 1, 240);
+    if (captureMethod != QStringLiteral("dxgi")
+        && captureMethod != QStringLiteral("wgc")) {
+        captureMethod = QStringLiteral("dxgi");
+    }
     samplingZones = std::clamp(samplingZones, 4, 300);
     samplingDepthPixels = std::clamp(samplingDepthPixels, 8, 512);
     constexpr std::array supportedSmoothing{0, 25, 60, 120};
@@ -224,6 +230,9 @@ AppSettings AppSettings::load(QSettings& settings)
     result.screenWidth = valueOr(settings, "width", result.screenWidth);
     result.screenHeight = valueOr(settings, "height", result.screenHeight);
     result.captureOutputId = valueOr(settings, "outputId", result.captureOutputId);
+    result.captureMethod = valueOr(settings, "captureMethod", result.captureMethod);
+    result.mirrorOutputId = valueOr(settings, "mirrorOutputId", result.mirrorOutputId);
+    result.mirrorFps = valueOr(settings, "mirrorFps", result.mirrorFps);
     result.targetFps = valueOr(settings, "targetFps", result.targetFps);
     result.gamingMode = valueOr(settings, "gamingMode", result.gamingMode);
     result.samplingZones = valueOr(settings, "samplingZones", result.samplingZones);
@@ -353,6 +362,9 @@ bool AppSettings::save(QSettings& settings) const
     settings.setValue(QStringLiteral("height"), screenHeight);
     settings.setValue(QStringLiteral("outputId"), captureOutputId);
     settings.setValue(QStringLiteral("targetFps"), targetFps);
+    settings.setValue(QStringLiteral("captureMethod"), captureMethod);
+    settings.setValue(QStringLiteral("mirrorOutputId"), mirrorOutputId);
+    settings.setValue(QStringLiteral("mirrorFps"), mirrorFps);
     settings.setValue(QStringLiteral("gamingMode"), gamingMode);
     settings.setValue(QStringLiteral("samplingZones"), samplingZones);
     settings.setValue(

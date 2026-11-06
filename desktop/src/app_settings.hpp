@@ -15,6 +15,9 @@ struct AppSettings final {
     int screenWidth = 3840;
     int screenHeight = 2160;
     QString captureOutputId;
+    QString captureMethod = QStringLiteral("dxgi");
+    QString mirrorOutputId;
+    int mirrorFps = 60;
     int targetFps = 60;
     bool gamingMode = false;
     int samplingZones = 300;

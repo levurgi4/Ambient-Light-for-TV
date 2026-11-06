@@ -23,6 +23,8 @@ bool testDefaults()
         && expect(settings.screenWidth == 3840, "default screen width")
         && expect(settings.screenHeight == 2160, "default screen height")
         && expect(settings.captureOutputId.isEmpty(), "default capture output")
+        && expect(settings.captureMethod == QStringLiteral("dxgi"),
+            "existing installations retain DXGI capture")
         && expect(settings.targetFps == 60, "default target frame rate")
         && expect(!settings.gamingMode, "existing installations keep normal capture")
         && expect(settings.automaticSamplingDepth, "default automatic sampling depth")
@@ -62,6 +64,7 @@ bool testNormalization()
 {
     ambilight::AppSettings settings;
     settings.language = QStringLiteral("unknown");
+    settings.captureMethod = QStringLiteral("unknown");
     settings.ledType = QStringLiteral("unsupported");
     settings.colorOrder = QStringLiteral("XYZ");
     settings.activeMode = QStringLiteral("unknown");
@@ -107,6 +110,11 @@ bool testNormalization()
     settings.automaticPortSelection = false;
     settings.portName = QStringLiteral("   ");
     settings.normalize();
+
+    if (!expect(settings.captureMethod == QStringLiteral("dxgi"),
+            "unknown capture methods fall back to DXGI")) {
+        return false;
+    }
 
     ambilight::AppSettings minimumDepthSettings;
     minimumDepthSettings.samplingDepthPixels = 0;
@@ -194,6 +202,9 @@ bool testRoundTrip()
     original.screenHeight = 1440;
     original.captureOutputId = QStringLiteral("dxgi:1:0");
     original.targetFps = 120;
+    original.captureMethod = QStringLiteral("wgc");
+    original.mirrorOutputId = QStringLiteral("mirror-test-display");
+    original.mirrorFps = 30;
     original.gamingMode = true;
     original.samplingZones = 256;
     original.automaticSamplingDepth = false;
@@ -254,6 +265,10 @@ bool testRoundTrip()
         && expect(restored.captureOutputId == original.captureOutputId,
             "capture output round trip")
         && expect(restored.targetFps == original.targetFps, "FPS round trip")
+        && expect(restored.captureMethod == original.captureMethod,
+            "Windows Graphics Capture selection survives restart")
+        && expect(restored.mirrorOutputId == original.mirrorOutputId
+            && restored.mirrorFps == original.mirrorFps, "mirror preferences survive restart")
         && expect(restored.gamingMode, "game mode survives restart")
         && expect(restored.samplingZones == original.samplingZones, "zones round trip")
         && expect(

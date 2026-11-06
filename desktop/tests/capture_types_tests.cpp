@@ -1,5 +1,6 @@
 #include "capture/capture_output_selection.hpp"
 #include "capture/capture_types.hpp"
+#include "capture/mirror_geometry.hpp"
 
 #include <QString>
 
@@ -462,11 +463,51 @@ bool testGamingPerimeterCopies()
         && expect(perimeterCopyRegions({}, 120).isEmpty(), "invalid surface is not copied");
 }
 
+bool testMirrorGeometryAndCadence()
+{
+    using namespace ambilight::capture;
+    const QRectF content = mirrorContentRect({3440, 1440}, {3840, 2160});
+    bool success = expect(std::abs(content.width() - 3840.0) < 0.001
+        && std::abs(content.height() - 1607.44186) < 0.001
+        && std::abs(content.top() - 276.27907) < 0.001, "ultrawide letterbox preserves aspect ratio");
+    success &= expect(mirrorContentRect({}, {1920, 1080}).isEmpty(), "invalid mirror source rejected");
+    success &= expect(mirrorContentRect({1920, 1080}, {1920, 1080}) == QRectF(0, 0, 1920, 1080), "matching aspect fills destination");
+    auto source = makeOutput(QStringLiteral("source"), QStringLiteral("DISPLAY1"), true);
+    auto target = makeOutput(QStringLiteral("target"), QStringLiteral("DISPLAY2"), false);
+    source.geometry = {0, 0, 3440, 1440};
+    target.geometry = {3440, 0, 3840, 2160};
+    success &= expect(separateMirrorOutputs(source, target), "extended displays are accepted");
+    success &= expect(!separateMirrorOutputs(source, source), "recursive mirror is rejected");
+    target.geometry = source.geometry;
+    success &= expect(!separateMirrorOutputs(source, target), "cloned displays are rejected");
+    CaptureConfiguration configuration;
+    configuration.mirrorWindow = 1;
+    configuration.mirrorOutputId = QStringLiteral("target");
+    configuration.targetFps = 30;
+    success &= expect(configuration.captureFps() == 60 && configuration.isValid(), "shared capture serves faster mirror");
+    configuration.targetFps = 240;
+    configuration.processLedColors = false;
+    success &= expect(configuration.captureFps() == 60, "disabled LEDs do not increase mirror capture rate");
+    configuration.mirrorOutputId.clear();
+    success &= expectInvalid(configuration, "mirror must have explicit destination");
+    CaptureRateGate gate;
+    int colors = 0;
+    for (int tick = 0; tick < 600; ++tick) {
+        const qint64 now = static_cast<qint64>(tick) * 1'000'000'000 / 60;
+        if (gate.due(now)) { ++colors; gate.advance(now, 30); }
+    }
+    success &= expect(colors >= 299 && colors <= 301, "60 Hz mirror retains 30 Hz color budget");
+    gate.advance(100'000'000'000LL, 30);
+    success &= expect(!gate.due(100'000'000'001LL), "stall does not produce catch-up work");
+    return success;
+}
+
 } // namespace
 
 int main()
 {
     const bool success = testValidConfigurationAndLayout()
+        && testMirrorGeometryAndCadence()
         && testGamingPerimeterCopies()
         && testLedBoundaries()
         && testFpsBoundaries()

@@ -42,6 +42,7 @@ signals:
     void statusChanged(const ambilight::capture::CaptureStatus& status);
     void outputsChanged(
         const QVector<ambilight::capture::CaptureOutput>& outputs);
+    void mirrorStatistics(quint64 presented, quint64 skipped, double processingMilliseconds);
 
 private:
     friend class ScreenCaptureRuntime;

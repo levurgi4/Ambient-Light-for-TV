@@ -1,6 +1,9 @@
 #include "screen_capture_worker.hpp"
 
 #include "capture_output_selection.hpp"
+#include "wgc_frame_source.hpp"
+#include "gpu_mirror_presenter.hpp"
+#include "mirror_geometry.hpp"
 
 #include <QDateTime>
 #include <QElapsedTimer>
@@ -28,6 +31,7 @@
 #endif
 #include <Windows.h>
 #include <d3d11.h>
+#include <d3d11_4.h>
 #include <d3dcompiler.h>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
@@ -1107,13 +1111,16 @@ struct CapturedFrame final {
     CaptureInsets contentInsets;
     QVector<QRgb> colors;
     HRESULT error = S_OK;
+    bool mirrored = false;
     QString errorMessage;
 };
 
-class DxgiCaptureBackend final {
+class GpuCaptureBackend final {
 public:
+    ~GpuCaptureBackend() { reset(); }
+
     [[nodiscard]] bool initialize(
-        const QString& requestedOutputId,
+        const CaptureConfiguration& configuration,
         CaptureOutput* selectedDescription,
         QString* errorMessage,
         HRESULT* nativeResult)
@@ -1121,11 +1128,37 @@ public:
         reset();
 
         auto selection =
-            selectDxgiOutput(requestedOutputId, errorMessage, nativeResult);
+            selectDxgiOutput(configuration.outputId, errorMessage, nativeResult);
         if (!selection.has_value()) {
             return false;
         }
         selectedOutput_ = selection->description;
+        useWgc_ = configuration.useWindowsGraphicsCapture;
+        if (configuration.mirrorWindow != 0) {
+            auto target = selectDxgiOutput(configuration.mirrorOutputId, errorMessage, nativeResult);
+            if (!target) return false;
+            DXGI_ADAPTER_DESC a{}, b{};
+            selection->adapter->GetDesc(&a);
+            target->adapter->GetDesc(&b);
+            if (!separateMirrorOutputs(selection->description, target->description)
+                || a.AdapterLuid.HighPart != b.AdapterLuid.HighPart
+                || a.AdapterLuid.LowPart != b.AdapterLuid.LowPart) {
+                return failInitialization(QStringLiteral(
+                    "Mirroring requires two extended displays on the same GPU."),
+                    E_INVALIDARG, errorMessage, nativeResult);
+            }
+            RECT windowRect{};
+            const HWND window = reinterpret_cast<HWND>(configuration.mirrorWindow);
+            DXGI_OUTPUT_DESC targetDescription{};
+            target->output->GetDesc(&targetDescription);
+            if (!GetWindowRect(window, &windowRect)
+                || MonitorFromWindow(window, MONITOR_DEFAULTTONULL) != targetDescription.Monitor) {
+                return failInitialization(QStringLiteral("Mirror window is not on the destination display."),
+                    E_INVALIDARG, errorMessage, nativeResult);
+            }
+            mirrorTargetMonitor_ = targetDescription.Monitor;
+            mirrorSourceRect_ = selection->description.geometry;
+        }
 
         constexpr D3D_FEATURE_LEVEL requestedFeatureLevels[] = {
             D3D_FEATURE_LEVEL_11_1,
@@ -1133,7 +1166,7 @@ public:
         D3D_FEATURE_LEVEL actualFeatureLevel = D3D_FEATURE_LEVEL_11_0;
         UINT deviceFlags =
             D3D11_CREATE_DEVICE_BGRA_SUPPORT
-            | D3D11_CREATE_DEVICE_SINGLETHREADED;
+            | (useWgc_ ? 0U : D3D11_CREATE_DEVICE_SINGLETHREADED);
 
         HRESULT result = D3D11CreateDevice(
             selection->adapter.Get(),
@@ -1175,18 +1208,40 @@ public:
                 nativeResult);
         }
 
-        result = selection->output->DuplicateOutput(
-            device_.Get(),
-            duplication_.GetAddressOf());
+        if (useWgc_) {
+            ComPtr<ID3D11Multithread> protection;
+            result = context_.As(&protection);
+            if (SUCCEEDED(result)) {
+                protection->SetMultithreadProtected(TRUE);
+                DXGI_OUTPUT_DESC description{};
+                result = selection->output->GetDesc(&description);
+                if (SUCCEEDED(result)) {
+                    result = wgc_.initialize(
+                        device_.Get(), description.Monitor, configuration.captureFps(), errorMessage);
+                }
+            }
+        } else {
+            result = selection->output->DuplicateOutput(
+                device_.Get(), duplication_.GetAddressOf());
+        }
         if (FAILED(result)) {
             return failInitialization(
-                QStringLiteral("IDXGIOutput1::DuplicateOutput failed: %1")
-                    .arg(hresultText(result)),
+                (useWgc_
+                    ? QStringLiteral("Windows Graphics Capture initialization failed: %1")
+                    : QStringLiteral("IDXGIOutput1::DuplicateOutput failed: %1"))
+                    .arg(hresultText(result))
+                    + (useWgc_ && errorMessage != nullptr && !errorMessage->isEmpty()
+                        ? QStringLiteral("; ") + *errorMessage : QString{}),
                 result,
                 errorMessage,
                 nativeResult);
         }
-        duplication_->GetDesc(&duplicationDescription_);
+        if (duplication_) {
+            duplication_->GetDesc(&duplicationDescription_);
+        } else {
+            // WGC frames are already oriented in logical monitor coordinates.
+            duplicationDescription_.Rotation = DXGI_MODE_ROTATION_IDENTITY;
+        }
 
         if (!createShader(errorMessage, &result)
             || !createBuffers(errorMessage, &result)) {
@@ -1195,6 +1250,13 @@ public:
             }
             reset();
             return false;
+        }
+
+        if (configuration.mirrorWindow != 0) {
+            result = mirror_.initialize(device_.Get(), reinterpret_cast<HWND>(configuration.mirrorWindow));
+            if (FAILED(result)) return failInitialization(
+                QStringLiteral("Mirror output initialization failed: %1").arg(hresultText(result)),
+                result, errorMessage, nativeResult);
         }
 
         if (selectedDescription != nullptr) {
@@ -1208,6 +1270,14 @@ public:
 
     void reset() noexcept
     {
+        mirror_.reset();
+        mirrorTargetMonitor_ = nullptr;
+        mirrorSourceRect_ = {};
+        wgc_.reset();
+        useWgc_ = false;
+        releaseDuplicationFrame();
+        lastFrameSize_ = {};
+        mirrorPending_ = false;
         sampleView_.Reset();
         sampleTexture_.Reset();
         sampleWidth_ = 0;
@@ -1228,10 +1298,24 @@ public:
     [[nodiscard]] CapturedFrame capture(
         const CaptureConfiguration& configuration,
         BlackBarDetector& detector,
-        const bool runBlackBarProbe)
+        const bool runBlackBarProbe,
+        const bool sampleColors,
+        const bool mirrorDue)
     {
         CapturedFrame captured;
-        if (duplication_ == nullptr) {
+        if (configuration.mirrorWindow != 0) {
+            const HWND window = reinterpret_cast<HWND>(configuration.mirrorWindow);
+            RECT bounds{};
+            if (!GetWindowRect(window, &bounds)
+                || MonitorFromWindow(window, MONITOR_DEFAULTTONULL) != mirrorTargetMonitor_
+                || mirrorSourceRect_.intersects(QRect(bounds.left, bounds.top,
+                    bounds.right - bounds.left, bounds.bottom - bounds.top))) {
+                captured.error = E_INVALIDARG;
+                captured.errorMessage = QStringLiteral("Mirror destination changed; restart on a separate display.");
+                return captured;
+            }
+        }
+        if (!useWgc_ && duplication_ == nullptr) {
             captured.error = E_UNEXPECTED;
             captured.errorMessage = QStringLiteral(
                 "Desktop duplication is not initialized.");
@@ -1240,11 +1324,38 @@ public:
 
         DXGI_OUTDUPL_FRAME_INFO frameInformation{};
         ComPtr<IDXGIResource> desktopResource;
-        const HRESULT acquireResult = duplication_->AcquireNextFrame(
-            0,
-            &frameInformation,
-            desktopResource.GetAddressOf());
+        ComPtr<ID3D11Texture2D> desktopTexture;
+        // Keep ownership between ticks: otherwise DXGI copies desktop updates
+        // at the display's rate while we are sleeping (not our target FPS).
+        // Release immediately before reacquiring, as recommended by DXGI.
+        const HRESULT releaseResult = releaseDuplicationFrame();
+        const HRESULT acquireResult = useWgc_
+            ? wgc_.acquire(desktopTexture.GetAddressOf(), configuration.captureFps(),
+                &captured.errorMessage)
+            : FAILED(releaseResult) ? releaseResult
+            : duplication_->AcquireNextFrame(0, &frameInformation,
+                  desktopResource.GetAddressOf());
         if (acquireResult == DXGI_ERROR_WAIT_TIMEOUT) {
+            // Retry the final desktop image if the TV was busy, even after
+            // the source becomes static. Only one GPU image is retained.
+            if (mirrorDue && mirrorPending_ && sampleView_) {
+                bool ready = false;
+                HRESULT hr = mirror_.prepare(&ready);
+                if (SUCCEEDED(hr) && ready)
+                    hr = mirror_.present(sampleView_.Get(), lastFrameSize_,
+                        shaderRotation(duplicationDescription_.Rotation), &captured.mirrored);
+                if (FAILED(hr)) {
+                    captured.error = hr;
+                    captured.errorMessage = QStringLiteral("Mirror retry failed: %1").arg(hresultText(hr));
+                    return captured;
+                }
+                if (captured.mirrored) {
+                    mirrorPending_ = false;
+                    captured.frameSize = lastFrameSize_;
+                    captured.result = FrameResult::Sampled;
+                    return captured;
+                }
+            }
             captured.result = FrameResult::WaitTimeout;
             captured.error = acquireResult;
             return captured;
@@ -1255,30 +1366,29 @@ public:
             captured.result = FrameResult::AccessLost;
             captured.error = acquireResult;
             captured.errorMessage =
-                QStringLiteral("Desktop duplication access was lost: %1")
+                QStringLiteral("Screen capture access was lost: %1")
                     .arg(hresultText(acquireResult));
             return captured;
         }
         if (FAILED(acquireResult)) {
             captured.error = acquireResult;
-            captured.errorMessage =
-                QStringLiteral("AcquireNextFrame failed: %1")
+            if (captured.errorMessage.isEmpty()) {
+                captured.errorMessage = QStringLiteral("AcquireNextFrame failed: %1")
                     .arg(hresultText(acquireResult));
+            }
             return captured;
         }
 
+        duplicationFrameHeld_ = !useWgc_;
         struct FrameReleaseGuard final {
-            IDXGIOutputDuplication* duplication = nullptr;
+            WgcFrameSource* wgc = nullptr;
             ~FrameReleaseGuard()
             {
-                if (duplication != nullptr) {
-                    duplication->ReleaseFrame();
-                }
+                if (wgc != nullptr) wgc->releaseFrame();
             }
-        } releaseGuard{duplication_.Get()};
+        } releaseGuard{useWgc_ ? &wgc_ : nullptr};
 
-        ComPtr<ID3D11Texture2D> desktopTexture;
-        HRESULT result = desktopResource.As(&desktopTexture);
+        HRESULT result = useWgc_ ? S_OK : desktopResource.As(&desktopTexture);
         if (FAILED(result)) {
             captured.error = result;
             captured.errorMessage =
@@ -1308,8 +1418,30 @@ public:
             return captured;
         }
         captured.frameSize = {logicalWidth, logicalHeight};
+        const bool frameSizeChanged = captured.frameSize != lastFrameSize_;
+        if (frameSizeChanged) {
+            // WGC can resize without recreating this backend. Old pixel insets
+            // must never be applied to the new resolution between probe ticks.
+            detector.reset();
+            lastFrameSize_ = captured.frameSize;
+            mirrorPending_ = false;
+        }
 
-        if (configuration.gamingMode
+        bool mirrorReady = false;
+        if (mirrorDue) {
+            result = mirror_.prepare(&mirrorReady);
+            if (FAILED(result)) {
+                captured.error = result;
+                captured.errorMessage = QStringLiteral("Mirror output unavailable: %1").arg(hresultText(result));
+                return captured;
+            }
+        }
+        if (!sampleColors && !mirrorDue) {
+            captured.result = FrameResult::Sampled;
+            return captured;
+        }
+
+        if (!mirrorDue && !mirrorPending_
             && configuration.blackBarDetectionMode == BlackBarDetectionMode::Off) {
             const int depth = resolvedSamplingDepthPixels(
                 captured.frameSize, {}, configuration.samplingDepthPixels);
@@ -1328,6 +1460,25 @@ public:
         } else {
             context_->CopyResource(sampleTexture_.Get(), desktopTexture.Get());
         }
+        if (mirrorDue) mirrorPending_ = true;
+
+        if (mirrorReady) {
+            result = mirror_.present(sampleView_.Get(), captured.frameSize,
+                shaderRotation(duplicationDescription_.Rotation), &captured.mirrored);
+            if (captured.mirrored) mirrorPending_ = false;
+            if (FAILED(result)) {
+                captured.error = result;
+                captured.errorMessage = QStringLiteral("Mirror presentation failed: %1").arg(hresultText(result));
+                return captured;
+            }
+        }
+        if (!sampleColors) {
+            // A queued copy without Present/Map still needs to be submitted
+            // before returning the borrowed capture surface to its producer.
+            if (mirrorPending_) context_->Flush();
+            captured.result = FrameResult::Sampled;
+            return captured;
+        }
 
         ShaderParameters parameters =
             makeParameters(configuration, sourceDescription, captured.frameSize);
@@ -1338,7 +1489,7 @@ public:
 
         if (configuration.blackBarDetectionMode
                 != BlackBarDetectionMode::Off
-            && runBlackBarProbe) {
+            && (runBlackBarProbe || frameSizeChanged)) {
             parameters.mode = 0;
             parameters.resultCount = kProbeResultCount;
             std::array<quint32, kProbeResultCount> probes{};
@@ -1405,6 +1556,13 @@ public:
     }
 
 private:
+    HRESULT releaseDuplicationFrame() noexcept
+    {
+        if (!duplicationFrameHeld_) return S_OK;
+        duplicationFrameHeld_ = false;
+        return duplication_ ? duplication_->ReleaseFrame() : S_OK;
+    }
+
     [[nodiscard]] bool failInitialization(
         const QString& message,
         const HRESULT result,
@@ -1782,6 +1940,14 @@ private:
     }
 
     CaptureOutput selectedOutput_;
+    WgcFrameSource wgc_;
+    GpuMirrorPresenter mirror_;
+    HMONITOR mirrorTargetMonitor_ = nullptr;
+    QRect mirrorSourceRect_;
+    bool mirrorPending_ = false;
+    bool useWgc_ = false;
+    bool duplicationFrameHeld_ = false;
+    QSize lastFrameSize_;
     DXGI_OUTDUPL_DESC duplicationDescription_{};
 
     ComPtr<ID3D11Device> device_;
@@ -1907,12 +2073,18 @@ public:
             || configuration.maximumBlackBarFraction
                 != configuration_.maximumBlackBarFraction;
 
+        const bool backendChanged = configuration.useWindowsGraphicsCapture
+            != configuration_.useWindowsGraphicsCapture
+            || configuration.mirrorWindow != configuration_.mirrorWindow
+            || configuration.mirrorOutputId != configuration_.mirrorOutputId;
+        colorGate_ = {};
+        mirrorGate_ = {};
         configuration_ = configuration;
         if (detectorChanged) {
             detector_.reset();
         }
 
-        if (runningRequested_ && outputChanged) {
+        if (runningRequested_ && (outputChanged || backendChanged)) {
             if (timer_ != nullptr) {
                 timer_->stop();
             }
@@ -1962,7 +2134,7 @@ private:
         QString errorMessage;
         HRESULT result = S_OK;
         if (!backend_.initialize(
-                configuration_.outputId,
+                configuration_,
                 &selectedOutput,
                 &errorMessage,
                 &result)) {
@@ -2010,8 +2182,10 @@ private:
         processingClock.start();
         const bool runProbe =
             (frameNumber_ % kProbeIntervalFrames) == 0U;
+        const bool colorsDue = configuration_.processLedColors && colorGate_.due(frameStartedNanoseconds);
+        const bool mirrorDue = configuration_.mirrorWindow != 0 && mirrorGate_.due(frameStartedNanoseconds);
         CapturedFrame captured =
-            backend_.capture(configuration_, detector_, runProbe);
+            backend_.capture(configuration_, detector_, runProbe, colorsDue, mirrorDue);
 
         if (captured.result == FrameResult::WaitTimeout) {
             if (lastFrameClock_.isValid()
@@ -2051,6 +2225,27 @@ private:
         }
 
         lastFrameClock_.restart();
+        if (mirrorDue) {
+            mirrorGate_.advance(frameStartedNanoseconds, configuration_.mirrorFps);
+            if (captured.mirrored) ++mirrorPresented_; else ++mirrorSkipped_;
+            if (!mirrorStatsClock_.isValid() || mirrorStatsClock_.elapsed() >= 500) {
+                mirrorStatsClock_.start();
+                const QPointer<ScreenCaptureWorker> owner = owner_;
+                const quint64 generation = configurationGeneration_;
+                const auto presented = mirrorPresented_, skipped = mirrorSkipped_;
+                const double milliseconds = processingClock.nsecsElapsed() / 1'000'000.0;
+                QMetaObject::invokeMethod(owner_.data(), [owner, generation, presented, skipped, milliseconds] {
+                    if (owner && owner->commandGeneration_.load(std::memory_order_relaxed) == generation)
+                        emit owner->mirrorStatistics(presented, skipped, milliseconds);
+                }, Qt::QueuedConnection);
+            }
+        }
+        if (captured.colors.isEmpty()) {
+            publishStatus(CaptureState::Running, QStringLiteral("Desktop capture is running."));
+            schedule(nextFrameDelay(frameStartedNanoseconds));
+            return;
+        }
+        colorGate_.advance(frameStartedNanoseconds, configuration_.targetFps);
         ++frameNumber_;
         updateFps();
 
@@ -2096,7 +2291,7 @@ private:
     {
         constexpr qint64 nanosecondsPerSecond = 1'000'000'000;
         constexpr qint64 nanosecondsPerMillisecond = 1'000'000;
-        const int targetFps = std::max(1, configuration_.targetFps);
+        const int targetFps = std::max(1, configuration_.captureFps());
 
         if (pacingTargetFps_ != targetFps
             || nextFrameDeadlineNanoseconds_ <= 0) {
@@ -2143,6 +2338,10 @@ private:
 
     void resetStatistics() noexcept
     {
+        colorGate_ = {};
+        mirrorGate_ = {};
+        mirrorPresented_ = mirrorSkipped_ = 0;
+        mirrorStatsClock_.invalidate();
         frameNumber_ = 0;
         framesSinceFpsUpdate_ = 0;
         measuredFps_ = 0.0;
@@ -2256,7 +2455,7 @@ private:
 
     QPointer<ScreenCaptureWorker> owner_;
     QTimer* timer_ = nullptr;
-    DxgiCaptureBackend backend_;
+    GpuCaptureBackend backend_;
     BlackBarDetector detector_;
     CaptureConfiguration configuration_;
     quint64 configurationGeneration_ = 1;
@@ -2267,6 +2466,9 @@ private:
     CaptureStatus lastStatus_;
     quint64 lastStatusGeneration_ = 0;
     QElapsedTimer fpsClock_;
+    CaptureRateGate colorGate_, mirrorGate_;
+    quint64 mirrorPresented_ = 0, mirrorSkipped_ = 0;
+    QElapsedTimer mirrorStatsClock_;
     QElapsedTimer lastFrameClock_;
     QElapsedTimer pacingClock_;
     quint64 frameNumber_ = 0;

@@ -1,4 +1,6 @@
 #include "main_window.hpp"
+#include "mirror_window.hpp"
+#include "capture/mirror_geometry.hpp"
 
 #include "autostart.hpp"
 #include "audio/audio_capture_worker.hpp"
@@ -400,6 +402,7 @@ MainWindow::MainWindow(QWidget* parent)
 MainWindow::~MainWindow()
 {
     stopCapture();
+    delete mirrorWindow_;
     stopAudio();
     stopTransport();
     qApp->removeNativeEventFilter(this);
@@ -416,6 +419,7 @@ void MainWindow::buildUi()
 
     buildGeneralTab();
     buildScreenTab();
+    buildMirrorTab();
     buildAudioTab();
     buildLedTab();
     buildConnectionTab();
@@ -457,6 +461,11 @@ void MainWindow::buildUi()
     layoutTestRefreshTimer_ = new QTimer(this);
     layoutTestRefreshTimer_->setTimerType(Qt::PreciseTimer);
     layoutTestRefreshTimer_->setInterval(50);
+
+    previewRefreshTimer_ = new QTimer(this);
+    previewRefreshTimer_->setSingleShot(true);
+    previewRefreshTimer_->setTimerType(Qt::PreciseTimer);
+    previewRefreshTimer_->setInterval(50);
 }
 
 void MainWindow::buildGeneralTab()
@@ -574,6 +583,15 @@ void MainWindow::buildScreenTab()
     outputLayout->addWidget(refreshOutputsButton_);
     sourceForm->addRow(captureOutputLabel_, outputLayout);
 
+    captureMethodLabel_ = makeFieldLabel(screenSourceGroup_);
+    captureMethodCombo_ = new QComboBox(screenSourceGroup_);
+    addComboItem(captureMethodCombo_, QStringLiteral("dxgi"));
+    addComboItem(captureMethodCombo_, QStringLiteral("wgc"));
+    sourceForm->addRow(captureMethodLabel_, captureMethodCombo_);
+    captureMethodHintLabel_ = new QLabel(screenSourceGroup_);
+    captureMethodHintLabel_->setWordWrap(true);
+    sourceForm->addRow(QString(), captureMethodHintLabel_);
+
     resolutionLabel_ = makeFieldLabel(screenSourceGroup_);
     auto* resolutionLayout = new QHBoxLayout();
     widthLabel_ = new QLabel(screenSourceGroup_);
@@ -690,6 +708,132 @@ void MainWindow::buildScreenTab()
     contentLayout->setStretch(1, 1);
     layout->addLayout(contentLayout, 1);
     tabs_->addTab(screenPage_, QString());
+}
+
+void MainWindow::buildMirrorTab()
+{
+    mirrorPage_ = new QWidget(tabs_);
+    auto* layout = new QVBoxLayout(mirrorPage_);
+    mirrorHintLabel_ = new QLabel(mirrorPage_);
+    mirrorHintLabel_->setWordWrap(true);
+    layout->addWidget(mirrorHintLabel_);
+    auto* form = new QFormLayout();
+    mirrorSourceLabel_ = new QLabel(mirrorPage_);
+    mirrorTargetLabel_ = new QLabel(mirrorPage_);
+    mirrorMethodLabel_ = new QLabel(mirrorPage_);
+    mirrorFpsLabel_ = new QLabel(mirrorPage_);
+    mirrorSourceCombo_ = new QComboBox(mirrorPage_);
+    mirrorTargetCombo_ = new QComboBox(mirrorPage_);
+    mirrorMethodCombo_ = new QComboBox(mirrorPage_);
+    mirrorMethodCombo_->addItem(QStringLiteral("DXGI Desktop Duplication"), QStringLiteral("dxgi"));
+    mirrorMethodCombo_->addItem(QStringLiteral("Windows Graphics Capture"), QStringLiteral("wgc"));
+    mirrorFpsSpin_ = makeSpinBox(mirrorPage_, 15, 60, QStringLiteral(" FPS"));
+    mirrorFpsSpin_->setValue(60);
+    form->addRow(mirrorSourceLabel_, mirrorSourceCombo_);
+    form->addRow(mirrorTargetLabel_, mirrorTargetCombo_);
+    form->addRow(mirrorMethodLabel_, mirrorMethodCombo_);
+    form->addRow(mirrorFpsLabel_, mirrorFpsSpin_);
+    layout->addLayout(form);
+    auto* buttons = new QHBoxLayout();
+    mirrorStartButton_ = new QPushButton(mirrorPage_);
+    mirrorStartButton_->setCheckable(true);
+    mirrorRefreshButton_ = new QPushButton(mirrorPage_);
+    mirrorHelpButton_ = new QPushButton(mirrorPage_);
+    buttons->addWidget(mirrorStartButton_);
+    buttons->addWidget(mirrorRefreshButton_);
+    buttons->addStretch();
+    buttons->addWidget(mirrorHelpButton_);
+    layout->addLayout(buttons);
+    mirrorStatusLabel_ = new QLabel(mirrorPage_);
+    mirrorStatusLabel_->setWordWrap(true);
+    layout->addWidget(mirrorStatusLabel_);
+    layout->addStretch();
+    tabs_->addTab(mirrorPage_, QString());
+    // An unowned top-level window stays visible when the settings window is
+    // minimized/hidden to the tray. Explicitly destroyed after worker stop.
+    mirrorWindow_ = new MirrorWindow(nullptr);
+    mirrorWindow_->stopRequested = [this] { stopMirror(); };
+}
+
+void MainWindow::updateMirrorUi()
+{
+    tabs_->setTabText(tabs_->indexOf(mirrorPage_), text("Mirroring", "Зеркалирование"));
+    mirrorHintLabel_->setText(text(
+        "Experimental mirror without blur. Works without lighting or ESP32. Select Extend with Win+P first. "
+        "Both displays must use the same GPU. Source and capture method are shared with Ambilight. "
+        "Full-frame copies are needed even in Game mode. Extra GPU load and TV latency are possible. "
+        "No automatic start or display-mode changes.",
+        "Экспериментальное зеркало без размытия. Работает без подсветки и ESP32. Сначала выберите «Расширить» через Win+P. "
+        "Оба экрана должны быть подключены к одной видеокарте. Источник и способ захвата общие с Ambilight. "
+        "Копируется полный кадр даже в игровом режиме. Возможны дополнительная нагрузка и задержка на ТВ. "
+        "Автозапуска и изменения раскладки Windows нет."));
+    mirrorSourceLabel_->setText(text("Source:", "Источник:"));
+    mirrorTargetLabel_->setText(text("Destination (TV):", "Назначение (ТВ):"));
+    mirrorMethodLabel_->setText(text("Capture method:", "Способ захвата:"));
+    mirrorFpsLabel_->setText(text("Mirror frame rate:", "Частота зеркала:"));
+    mirrorStartButton_->setText(mirrorRunning_ ? text("Stop", "Остановить") : text("Start mirror", "Запустить зеркало"));
+    mirrorRefreshButton_->setText(text("Refresh displays", "Обновить экраны"));
+    mirrorHelpButton_->setText(text("Help", "Справка"));
+    mirrorSourceCombo_->setEnabled(!mirrorRunning_);
+    mirrorTargetCombo_->setEnabled(!mirrorRunning_);
+    captureOutputCombo_->setEnabled(!mirrorRunning_);
+    mirrorRefreshButton_->setEnabled(!mirrorRunning_);
+    if (stopMirrorAction_) {
+        stopMirrorAction_->setText(text("Stop TV mirror", "Остановить зеркало ТВ"));
+        stopMirrorAction_->setEnabled(mirrorRunning_);
+    }
+    const QSignalBlocker sourceBlocker(mirrorSourceCombo_), methodBlocker(mirrorMethodCombo_);
+    mirrorSourceCombo_->setCurrentIndex(captureOutputCombo_->currentIndex());
+    selectComboValue(mirrorMethodCombo_, comboValue(captureMethodCombo_));
+}
+
+void MainWindow::toggleMirror(const bool enabled)
+{
+    if (!enabled) { stopMirror(); return; }
+    const auto* source = capture::resolveCaptureOutput(captureOutputs_, comboValue(captureOutputCombo_));
+    const auto* target = capture::resolveCaptureOutput(captureOutputs_, comboValue(mirrorTargetCombo_));
+    if (!source || !target || !capture::separateMirrorOutputs(*source, *target)) {
+        const QSignalBlocker blocker(mirrorStartButton_);
+        mirrorStartButton_->setChecked(false);
+        mirrorStatusLabel_->setText(text(
+            "Select two different extended displays. Mirroring to the source is not allowed.",
+            "Выберите два разных экрана в режиме «Расширить». Нельзя выводить зеркало на источник."));
+        return;
+    }
+    // Freeze automatic selection to the current source while the mirror runs.
+    const QString sourceId = source->id;
+    const QRect targetRect = target->geometry;
+    selectComboValue(captureOutputCombo_, sourceId);
+    const HWND window = reinterpret_cast<HWND>(mirrorWindow_->winId());
+    if (!SetWindowPos(window, HWND_TOPMOST, targetRect.x(), targetRect.y(),
+            targetRect.width(), targetRect.height(), SWP_NOACTIVATE)) {
+        mirrorWindow_->hide();
+        const QSignalBlocker blocker(mirrorStartButton_);
+        mirrorStartButton_->setChecked(false);
+        mirrorStatusLabel_->setText(text("Cannot position the TV window.", "Не удалось разместить окно на ТВ."));
+        return;
+    }
+    mirrorWindow_->show();
+    SetWindowPos(window, HWND_TOPMOST, targetRect.x(), targetRect.y(),
+        targetRect.width(), targetRect.height(), SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    mirrorRunning_ = true;
+    mirrorStatusLabel_->setText(text("Starting mirror…", "Запуск зеркала…"));
+    updateMirrorUi();
+    updateCaptureConfiguration();
+}
+
+void MainWindow::stopMirror()
+{
+    if (!mirrorRunning_) return;
+    // Release the HWND's swap chain on its owning worker before hiding it.
+    stopCapture();
+    mirrorRunning_ = false;
+    mirrorWindow_->hide();
+    const QSignalBlocker blocker(mirrorStartButton_);
+    mirrorStartButton_->setChecked(false);
+    mirrorStatusLabel_->setText(text("Mirror stopped.", "Зеркало остановлено."));
+    updateMirrorUi();
+    if (!exiting_) updateCaptureConfiguration();
 }
 
 void MainWindow::buildAudioTab()
@@ -1058,6 +1202,7 @@ void MainWindow::buildTray()
     trayMenu_ = new QMenu(this);
     showAction_ = trayMenu_->addAction(QString());
     toggleLightingAction_ = trayMenu_->addAction(QString());
+    stopMirrorAction_ = trayMenu_->addAction(QString());
     trayMenu_->addSeparator();
     quitAction_ = trayMenu_->addAction(QString());
 
@@ -1068,9 +1213,48 @@ void MainWindow::buildTray()
 
 void MainWindow::connectSignals()
 {
+    connect(mirrorStartButton_, &QPushButton::toggled, this, &MainWindow::toggleMirror);
+    connect(mirrorRefreshButton_, &QPushButton::clicked, this, &MainWindow::refreshCaptureOutputs);
+    connect(mirrorSourceCombo_, &QComboBox::currentIndexChanged, this, [this](int index) {
+        if (!mirrorRunning_) captureOutputCombo_->setCurrentIndex(index);
+    });
+    connect(captureOutputCombo_, &QComboBox::currentIndexChanged, this, &MainWindow::updateMirrorUi);
+    connect(mirrorMethodCombo_, &QComboBox::currentIndexChanged, this, [this] {
+        selectComboValue(captureMethodCombo_, comboValue(mirrorMethodCombo_));
+    });
+    connect(captureMethodCombo_, &QComboBox::currentIndexChanged, this, &MainWindow::updateMirrorUi);
+    connect(mirrorFpsSpin_, &QSpinBox::valueChanged, this, [this] {
+        scheduleCaptureUpdate(); saveTimer_->start();
+    });
+    connect(mirrorTargetCombo_, &QComboBox::currentIndexChanged, saveTimer_, qOverload<>(&QTimer::start));
+    connect(mirrorHelpButton_, &QPushButton::clicked, this, [this] {
+        QMessageBox::information(this, text("TV mirror", "Зеркало ТВ"), text(
+            "1. Win+P > Extend.\n2. Select the source monitor and destination TV.\n3. Start the mirror; lighting may stay off.\n"
+            "If a game is not captured, try WGC. Keep the game on the source display.\n"
+            "This first version preserves aspect ratio with black bars (no blur), SDR only; the separate system cursor is not drawn. "
+            "Stop here or from the tray. Closing the application stops the mirror. "
+            "Display topology changes stop it for safety. Compare game FPS and TV delay against Windows Duplicate.",
+            "1. Win+P → Расширить.\n2. Выберите монитор-источник и ТВ-назначение.\n3. Запустите зеркало; подсветку можно выключить.\n"
+            "Если игра не захватывается, попробуйте WGC. Игра должна оставаться на экране-источнике.\n"
+            "Первая версия сохраняет пропорции с чёрными полосами (без размытия), только SDR; отдельный системный курсор не выводится. "
+            "Остановка — здесь или через трей. Выход из приложения завершает зеркало. "
+            "Изменение конфигурации экранов останавливает его для безопасности. Сравните FPS игры и задержку на ТВ с режимом «Дублировать»."));
+    });
+    if (stopMirrorAction_) connect(stopMirrorAction_, &QAction::triggered, this, &MainWindow::stopMirror);
+    connect(captureWorker_, &capture::ScreenCaptureWorker::mirrorStatistics, this,
+        [this](quint64 presented, quint64 skipped, double milliseconds) {
+            if (mirrorRunning_) mirrorStatusLabel_->setText(text(
+                "Presented: %1 · skipped (output busy): %2 · last capture/processing: %3 ms (not TV latency)",
+                "Выведено: %1 · пропущено (вывод занят): %2 · последний захват/обработка: %3 мс (не задержка ТВ)")
+                .arg(presented).arg(skipped).arg(milliseconds, 0, 'f', 2));
+        });
     connect(tabs_, &QTabWidget::currentChanged, this, [this] {
         updateWindowSizeForCurrentTab();
+        updatePreviewFromLastCapture();
+        updateDiagnostics();
     });
+    connect(previewRefreshTimer_, &QTimer::timeout,
+        this, &MainWindow::updatePreviewFromLastCapture);
 
     const auto connectHelp =
         [this](QPushButton* button, QWidget* page) {
@@ -1220,6 +1404,13 @@ void MainWindow::connectSignals()
     connect(gamingModeCheck_, &QCheckBox::toggled, this, [this] {
         clearCapturedFrame();
         updateSamplingDepthUi();
+        updateDiagnostics();
+        scheduleCaptureUpdate();
+        scheduleSave();
+    });
+
+    connect(captureMethodCombo_, &QComboBox::currentIndexChanged, this, [this] {
+        clearCapturedFrame();
         updateDiagnostics();
         scheduleCaptureUpdate();
         scheduleSave();
@@ -1672,6 +1863,14 @@ void MainWindow::applySettings(const AppSettings& value)
         screenHeightSpin_->setValue(selectedOutputSize.height());
     }
     fpsSpin_->setValue(value.targetFps);
+    selectComboValue(captureMethodCombo_, value.captureMethod);
+    mirrorFpsSpin_->setValue(value.mirrorFps);
+    if (!value.mirrorOutputId.isEmpty()) {
+        if (mirrorTargetCombo_->findData(value.mirrorOutputId) < 0)
+            mirrorTargetCombo_->addItem(text("Unavailable display (%1)", "Недоступный экран (%1)")
+                .arg(value.mirrorOutputId), value.mirrorOutputId);
+        selectComboValue(mirrorTargetCombo_, value.mirrorOutputId);
+    }
     gamingModeCheck_->setChecked(value.gamingMode);
     zonesSpin_->setValue(value.samplingZones);
     selectComboValue(regionColorModeCombo_, value.regionColorMode);
@@ -1783,6 +1982,9 @@ AppSettings MainWindow::settingsFromUi() const
     value.screenHeight = screenHeightSpin_->value();
     value.captureOutputId = comboValue(captureOutputCombo_);
     value.targetFps = fpsSpin_->value();
+    value.captureMethod = comboValue(captureMethodCombo_);
+    value.mirrorOutputId = mirrorTargetCombo_->currentData().toString();
+    value.mirrorFps = mirrorFpsSpin_->value();
     value.gamingMode = gamingModeCheck_->isChecked();
     value.samplingZones = zonesSpin_->value();
     value.regionColorMode = comboValue(regionColorModeCombo_);
@@ -1877,6 +2079,7 @@ void MainWindow::restoreDefaults()
         QMessageBox::warning(this, windowTitle(), error);
     }
 
+    stopMirror();
     unregisterGlobalHotkey();
     applySettings(AppSettings {});
     applyHotkey(hotkeyEdit_->keySequence());
@@ -1930,6 +2133,7 @@ QString MainWindow::text(const char* english, const char* russian) const
 
 void MainWindow::retranslateUi()
 {
+    updateMirrorUi();
     setWindowTitle(QStringLiteral("Ambilight by Levurgi4 — v%1")
         .arg(QCoreApplication::applicationVersion()));
     tabs_->setTabText(tabs_->indexOf(generalPage_), text("General", "Основное"));
@@ -2338,6 +2542,8 @@ void MainWindow::showTabHelp(QWidget* page)
 
 • Capture display selects which display is analyzed. Automatic follows the Windows primary display; select the TV explicitly if it must work independently. Use Refresh after connecting or disconnecting a display.
 
+• Capture method: use Windows Graphics Capture if DXGI captures the desktop but freezes in a game. Select the game's display explicitly, especially with duplicated or multiple displays. Windows may show a capture border. Both methods support Game mode, but capture overhead differs. This is display capture, not an in-game hook; some games or protected content may still be unavailable. Diagnostics retains the last capture error even after minimizing the game.
+
 • Capture resolution is detected automatically and is read-only.
 
 • Game mode reduces GPU work: up to 30 FPS, 80 zones and 16 points per zone with mean color. Only the edge strips are copied. Black-bar detection is disabled, so letterboxed games may produce dark top/bottom lighting. Lower FPS and fewer samples reduce smoothness and detail. The depth, LED count, white balance and dark-tone correction remain available. Disabling Game mode restores your normal processing settings. The FPS benefit depends on the game, GPU and Windows capture overhead.
@@ -2362,6 +2568,8 @@ void MainWindow::showTabHelp(QWidget* page)
             : QString::fromUtf8(R"HELP(Здесь выбираются источник изображения и способ расчёта цветов.
 
 • «Экран захвата» определяет, изображение какого дисплея анализировать. «Автоматически» следует за основным экраном Windows; выберите телевизор явно, если он должен работать независимо. Нажмите «Обновить» после подключения или отключения дисплея.
+
+• Способ захвата: выберите Windows Graphics Capture, если DXGI видит рабочий стол, но замирает в игре. Явно выберите экран с игрой, особенно при дублировании или нескольких дисплеях. Windows может показать рамку захвата. Оба способа поддерживают игровой режим, но нагрузка отличается. Захватывается дисплей, без внедрения в игру; некоторые игры и защищённое изображение могут оставаться недоступными. Диагностика сохраняет последнюю ошибку захвата даже после сворачивания игры.
 
 • Разрешение захвата определяется автоматически и не редактируется.
 
@@ -2720,6 +2928,16 @@ void MainWindow::updateSamplingOverlay()
 
 void MainWindow::updateSamplingDepthUi()
 {
+    captureMethodLabel_->setText(text("Capture method:", "Способ захвата:"));
+    captureMethodCombo_->setItemText(0, QStringLiteral("DXGI Desktop Duplication"));
+    captureMethodCombo_->setItemText(1, QStringLiteral("Windows Graphics Capture"));
+    captureMethodHintLabel_->setText(text(
+        "If a game freezes DXGI capture, try Windows Graphics Capture and "
+        "select the game's display explicitly. Windows may show a capture border. "
+        "Game mode works with either method; capture overhead can differ.",
+        "Если DXGI не видит игру, попробуйте Windows Graphics Capture и явно "
+        "выберите экран с игрой. Windows может показывать рамку захвата. "
+        "Игровой режим работает с обоими способами; нагрузка может отличаться."));
     const bool gaming = gamingModeCheck_->isChecked();
     gamingModeCheck_->setText(text("Game mode (lower GPU load)",
         "Игровой режим (меньше нагрузка на GPU)"));
@@ -2978,6 +3196,10 @@ void MainWindow::updateHotkeyStatusUi()
 
 void MainWindow::updateDiagnostics()
 {
+    // Keep the source data current, but do not rebuild a hidden text document.
+    // Opening the tab/window explicitly refreshes it even on a static desktop.
+    if (!diagnosticsPage_->isVisible() || isMinimized()) return;
+
     const int ledCount = topLedsSpin_->value() + rightLedsSpin_->value()
         + bottomLedsSpin_->value() + leftLedsSpin_->value();
     const QString hotkey = registeredHotkey_.isEmpty()
@@ -3003,6 +3225,10 @@ void MainWindow::updateDiagnostics()
                .arg(captureOutputCombo_->currentText())
         << text("Capture state: %1", "Состояние захвата: %1")
                .arg(captureState)
+        << text("Capture method: %1", "Способ захвата: %1")
+               .arg(captureMethodCombo_->currentText())
+        << text("Last capture error this session: %1", "Последняя ошибка захвата за сеанс: %1")
+               .arg(lastCaptureError_.isEmpty() ? text("none", "нет") : lastCaptureError_)
         << text("Source: %1 × %2; target %3 FPS",
                "Источник: %1 × %2; цель %3 FPS")
                .arg(sourceSize.width())
@@ -3542,6 +3768,27 @@ void MainWindow::applyCaptureOutputs(
         selectedIndex = captureOutputCombo_->count() - 1;
     }
     captureOutputCombo_->setCurrentIndex(std::max(0, selectedIndex));
+    {
+        const QSignalBlocker sourceBlocker(mirrorSourceCombo_), targetBlocker(mirrorTargetCombo_);
+        const QString targetId = mirrorTargetCombo_->currentData().toString();
+        mirrorSourceCombo_->clear();
+        mirrorTargetCombo_->clear();
+        for (int i = 0; i < captureOutputCombo_->count(); ++i)
+            mirrorSourceCombo_->addItem(captureOutputCombo_->itemText(i), captureOutputCombo_->itemData(i));
+        for (const auto& output : outputs) mirrorTargetCombo_->addItem(output.label, output.id);
+        int index = mirrorTargetCombo_->findData(targetId);
+        if (index < 0 && !targetId.isEmpty()) {
+            mirrorTargetCombo_->addItem(text("Unavailable display (%1)", "Недоступный экран (%1)")
+                .arg(targetId), targetId);
+            index = mirrorTargetCombo_->count() - 1;
+        }
+        if (index < 0) {
+            index = outputs.size() > 1 ? 1 : 0;
+            for (int i = 0; i < outputs.size(); ++i) if (!outputs[i].primary) { index = i; break; }
+        }
+        mirrorTargetCombo_->setCurrentIndex(index);
+    }
+    updateMirrorUi();
     const QSize selectedSize =
         captureOutputCombo_->currentData(kCaptureOutputSizeRole).toSize();
     if (selectedSize.isValid()) {
@@ -4232,7 +4479,7 @@ void MainWindow::updateCaptureConfiguration()
     }
 
     const bool shouldCapture = captureShouldBeActive();
-    if (!shouldCapture) {
+    if (!shouldCapture && !mirrorRunning_) {
         captureWorker_->stop();
         clearCapturedFrame(!audioShouldBeActive());
         const bool ledTestActive = testWhiteBalanceButton_->isChecked()
@@ -4258,6 +4505,13 @@ void MainWindow::updateCaptureConfiguration()
         return;
     }
 
+    if (!shouldCapture) {
+        clearCapturedFrame(!audioShouldBeActive()
+            && !testWhiteBalanceButton_->isChecked() && !layoutTestButton_->isChecked());
+        captureStatusText_ = text("Capture for TV mirror only; Ambilight is paused.",
+            "Захват только для зеркала ТВ; Ambilight приостановлен.");
+        ledPreview_->setStatus(captureStatusText_, false);
+    }
     const PerimeterLayout ledLayout{
         .top = topLedsSpin_->value(),
         .right = rightLedsSpin_->value(),
@@ -4270,7 +4524,15 @@ void MainWindow::updateCaptureConfiguration()
                : zonesSpin_->value(), ledLayout);
 
     capture::CaptureConfiguration configuration;
+    configuration.processLedColors = shouldCapture;
+    if (mirrorRunning_) {
+        configuration.mirrorWindow = static_cast<quintptr>(mirrorWindow_->winId());
+        configuration.mirrorOutputId = comboValue(mirrorTargetCombo_);
+        configuration.mirrorFps = mirrorFpsSpin_->value();
+    }
     configuration.outputId = comboValue(captureOutputCombo_);
+    configuration.useWindowsGraphicsCapture =
+        comboValue(captureMethodCombo_) == QStringLiteral("wgc");
     configuration.topLedCount = samplingLayout.top;
     configuration.rightLedCount = samplingLayout.right;
     configuration.bottomLedCount = samplingLayout.bottom;
@@ -4311,6 +4573,7 @@ void MainWindow::updateCaptureConfiguration()
 
 void MainWindow::clearCapturedFrame(const bool clearLedOutput)
 {
+    previewRefreshTimer_->stop();
     const int previousSamplingDepth = effectiveSamplingDepthPixels();
     ledFrameFilter_.reset();
     if (clearLedOutput) {
@@ -4334,6 +4597,8 @@ void MainWindow::clearCapturedFrame(const bool clearLedOutput)
 
 void MainWindow::updatePreviewFromLastCapture()
 {
+    previewRefreshTimer_->stop();
+    if (!ledPreview_->isVisible() || isMinimized()) return;
     if (lastLogicalLedColors_.isEmpty()
         || lastLogicalLedColors_.size()
             != topLedsSpin_->value() + rightLedsSpin_->value()
@@ -4421,7 +4686,8 @@ void MainWindow::handleCaptureSample(const capture::CaptureSample& sample)
     if (effectiveSamplingDepthPixels() != previousSamplingDepth) {
         updateSamplingDepthUi();
     }
-    captureStatusText_ = text("DXGI capture active", "DXGI-захват активен");
+    captureStatusText_ = text("Capture active: %1", "Захват активен: %1")
+        .arg(captureMethodCombo_->currentText());
     if (sample.frameSize.isValid()) {
         const QSignalBlocker widthBlocker(screenWidthSpin_);
         const QSignalBlocker heightBlocker(screenHeightSpin_);
@@ -4430,7 +4696,14 @@ void MainWindow::handleCaptureSample(const capture::CaptureSample& sample)
     }
 
     ledPreview_->setStatus(captureStatusText_, true);
-    updatePreviewFromLastCapture();
+    // The strip keeps the full capture rate. Only the on-screen preview is
+    // limited to 20 Hz, and hidden previews do no color conversion/layout work.
+    // A trailing refresh also displays the final frame if the desktop stops
+    // changing before the next 50 ms interval has elapsed.
+    if (ledPreview_->isVisible() && !isMinimized()
+        && !previewRefreshTimer_->isActive()) {
+        previewRefreshTimer_->start();
+    }
 
     if ((sample.frameNumber % 15U) == 0U) {
         updateDiagnostics();
@@ -4439,6 +4712,12 @@ void MainWindow::handleCaptureSample(const capture::CaptureSample& sample)
 
 void MainWindow::handleCaptureStatus(const capture::CaptureStatus& status)
 {
+    if (mirrorRunning_ && status.state == capture::CaptureState::Error) {
+        stopMirror();
+        mirrorStatusLabel_->setText(text("Mirror error: %1", "Ошибка зеркала: %1").arg(status.message));
+    }
+    if (mirrorRunning_ && status.state != capture::CaptureState::Running)
+        mirrorStatusLabel_->setText(status.message);
     // stop() is asynchronous. Once an LED test has taken ownership of the
     // strip, a late Stopped status from Desktop Duplication must not clear
     // the retained test frame and let the ESP32 lease expire.
@@ -4456,7 +4735,8 @@ void MainWindow::handleCaptureStatus(const capture::CaptureStatus& status)
         stateText = text("Starting capture", "Запуск захвата");
         break;
     case capture::CaptureState::Running:
-        stateText = text("DXGI capture active", "DXGI-захват активен");
+        stateText = text("Capture active: %1", "Захват активен: %1")
+            .arg(captureMethodCombo_->currentText());
         active = true;
         break;
     case capture::CaptureState::WaitingForFrame:
@@ -4482,6 +4762,7 @@ void MainWindow::handleCaptureStatus(const capture::CaptureStatus& status)
                              static_cast<qulonglong>(status.nativeError),
                              0,
                              16);
+        lastCaptureError_ = stateText;
     }
 
     captureStatusText_ = stateText;
@@ -4537,6 +4818,16 @@ void MainWindow::showWindow()
     activateWindow();
 }
 
+void MainWindow::showEvent(QShowEvent* event)
+{
+    QMainWindow::showEvent(event);
+    // Also covers restoration through the taskbar, not just the tray action.
+    QTimer::singleShot(0, this, [this] {
+        updatePreviewFromLastCapture();
+        updateDiagnostics();
+    });
+}
+
 void MainWindow::closeEvent(QCloseEvent* event)
 {
     const bool sessionShutdown = qApp->isSavingSession();
@@ -4578,6 +4869,7 @@ void MainWindow::exitApplication()
         !sessionShutdown
         && transportStatus_.state == transport::ConnectionState::Connected;
     exiting_ = true;
+    stopMirror();
     saveSettings(false);
     stopCapture();
     stopAudio();
@@ -4722,6 +5014,17 @@ bool MainWindow::nativeEventFilter(
             }
             return true;
         }
+    }
+    if (nativeMessage != nullptr
+        && nativeMessage->message == WM_DISPLAYCHANGE && mirrorRunning_) {
+        // Defer out of the native callback before synchronizing with D3D.
+        QTimer::singleShot(0, this, [this] {
+            if (!mirrorRunning_) return;
+            stopMirror();
+            refreshCaptureOutputs();
+            mirrorStatusLabel_->setText(text("Displays changed; restart mirroring after checking the destination.",
+                "Конфигурация экранов изменилась. Проверьте назначение и запустите зеркало снова."));
+        });
     }
     if (nativeMessage != nullptr
         && nativeMessage->message == WM_HOTKEY

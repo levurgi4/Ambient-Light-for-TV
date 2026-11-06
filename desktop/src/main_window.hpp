@@ -28,6 +28,7 @@ class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
 class QSlider;
+class QShowEvent;
 class QSpinBox;
 class QSystemTrayIcon;
 class QTabWidget;
@@ -42,6 +43,7 @@ inline constexpr wchar_t kSingleInstanceActivationAckEventName[] =
     L"Local\\Levurgi4.AmbilightByLevurgi4.ActivationAcknowledged";
 
 class LedPreviewWidget;
+class MirrorWindow;
 
 namespace capture {
 class ScreenCaptureWorker;
@@ -66,6 +68,7 @@ public:
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+    void showEvent(QShowEvent* event) override;
     bool nativeEventFilter(
         const QByteArray& eventType,
         void* message,
@@ -97,6 +100,10 @@ private:
     void buildUi();
     void buildGeneralTab();
     void buildScreenTab();
+    void buildMirrorTab();
+    void updateMirrorUi();
+    void toggleMirror(bool enabled);
+    void stopMirror();
     void buildAudioTab();
     void buildLedTab();
     void buildConnectionTab();
@@ -196,6 +203,7 @@ private:
 
     QSettings settings_;
     QTimer* saveTimer_ = nullptr;
+    QTimer* previewRefreshTimer_ = nullptr;
     QTimer* captureUpdateTimer_ = nullptr;
     QTimer* audioUpdateTimer_ = nullptr;
     QTimer* transportUpdateTimer_ = nullptr;
@@ -237,6 +245,23 @@ private:
     QTabWidget* tabs_ = nullptr;
     QWidget* generalPage_ = nullptr;
     QWidget* screenPage_ = nullptr;
+    QWidget* mirrorPage_ = nullptr;
+    MirrorWindow* mirrorWindow_ = nullptr;
+    bool mirrorRunning_ = false;
+    QComboBox* mirrorSourceCombo_ = nullptr;
+    QComboBox* mirrorTargetCombo_ = nullptr;
+    QComboBox* mirrorMethodCombo_ = nullptr;
+    QSpinBox* mirrorFpsSpin_ = nullptr;
+    QPushButton* mirrorStartButton_ = nullptr;
+    QPushButton* mirrorRefreshButton_ = nullptr;
+    QPushButton* mirrorHelpButton_ = nullptr;
+    QLabel* mirrorHintLabel_ = nullptr;
+    QLabel* mirrorSourceLabel_ = nullptr;
+    QLabel* mirrorTargetLabel_ = nullptr;
+    QLabel* mirrorMethodLabel_ = nullptr;
+    QLabel* mirrorFpsLabel_ = nullptr;
+    QLabel* mirrorStatusLabel_ = nullptr;
+    QAction* stopMirrorAction_ = nullptr;
     QWidget* audioPage_ = nullptr;
     QWidget* ledPage_ = nullptr;
     QWidget* connectionPage_ = nullptr;
@@ -260,6 +285,10 @@ private:
     QSpinBox* screenWidthSpin_ = nullptr;
     QSpinBox* screenHeightSpin_ = nullptr;
     QSpinBox* fpsSpin_ = nullptr;
+    QComboBox* captureMethodCombo_ = nullptr;
+    QString lastCaptureError_;
+    QLabel* captureMethodLabel_ = nullptr;
+    QLabel* captureMethodHintLabel_ = nullptr;
     QCheckBox* gamingModeCheck_ = nullptr;
     QLabel* gamingModeHintLabel_ = nullptr;
     QSpinBox* zonesSpin_ = nullptr;

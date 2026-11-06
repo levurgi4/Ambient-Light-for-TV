@@ -205,6 +205,17 @@ struct SamplingLayout final {
 
 struct CaptureConfiguration final {
     QString outputId;
+    bool useWindowsGraphicsCapture = false;
+    bool processLedColors = true;
+    // Native HWND owned by the UI. Mirroring is never restored automatically.
+    quintptr mirrorWindow = 0;
+    QString mirrorOutputId;
+    int mirrorFps = 60;
+
+    [[nodiscard]] int captureFps() const noexcept {
+        return mirrorWindow != 0
+            ? std::max(processLedColors ? targetFps : 0, mirrorFps) : targetFps;
+    }
 
     int topLedCount = 96;
     int rightLedCount = 54;
@@ -243,6 +254,12 @@ struct CaptureConfiguration final {
 
         const int counts[] = {
             topLedCount, rightLedCount, bottomLedCount, leftLedCount};
+        if (mirrorFps < 15 || mirrorFps > 60) {
+            return reject(QStringLiteral("Mirror FPS must be between 15 and 60."));
+        }
+        if (mirrorWindow != 0 && mirrorOutputId.trimmed().isEmpty()) {
+            return reject(QStringLiteral("Select an explicit mirror destination."));
+        }
         for (const int count : counts) {
             if (count < 0 || count > kMaximumLedCount) {
                 return reject(QStringLiteral(

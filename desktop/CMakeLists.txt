@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    project(AmbilightDesktop VERSION 0.2.9 LANGUAGES CXX)
+    project(AmbilightDesktop VERSION 0.2.10 LANGUAGES CXX)
     include(CTest)
 endif()
 
@@ -25,6 +25,11 @@ qt_add_executable(ambilight_desktop WIN32
     src/capture/capture_types.hpp
     src/capture/screen_capture_worker.cpp
     src/capture/screen_capture_worker.hpp
+    src/capture/wgc_frame_source.cpp
+    src/capture/wgc_frame_source.hpp
+    src/capture/gpu_mirror_presenter.cpp
+    src/capture/gpu_mirror_presenter.hpp
+    src/capture/mirror_geometry.hpp
     src/led_frame_filter.cpp
     src/led_frame_filter.hpp
     src/led_preview_widget.cpp
@@ -86,6 +91,7 @@ if(WIN32)
         setupapi
         advapi32
         user32
+        windowsapp
     )
     target_compile_definitions(ambilight_desktop PRIVATE
         NOMINMAX
@@ -123,6 +129,34 @@ qt_generate_deploy_app_script(
 install(SCRIPT ${ambilight_deploy_script})
 
 if(BUILD_TESTING)
+    add_executable(ambilight_mirror_presenter_smoke EXCLUDE_FROM_ALL
+        src/capture/gpu_mirror_presenter.cpp tests/mirror_presenter_smoke.cpp)
+    target_compile_features(ambilight_mirror_presenter_smoke PRIVATE cxx_std_20)
+    target_include_directories(ambilight_mirror_presenter_smoke PRIVATE src)
+    target_link_libraries(ambilight_mirror_presenter_smoke PRIVATE Qt6::Widgets d3d11 d3dcompiler dxgi)
+    target_compile_definitions(ambilight_mirror_presenter_smoke PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    if(MSVC)
+        target_compile_options(ambilight_mirror_presenter_smoke PRIVATE /utf-8 /W4)
+    endif()
+    # Manual only: CI does not provide an interactive captured desktop.
+    add_executable(ambilight_capture_backend_smoke EXCLUDE_FROM_ALL
+        src/capture/screen_capture_worker.cpp
+        src/capture/screen_capture_worker.hpp
+        src/capture/wgc_frame_source.cpp
+        src/capture/gpu_mirror_presenter.cpp
+        tests/capture_backend_smoke.cpp
+    )
+    target_compile_features(ambilight_capture_backend_smoke PRIVATE cxx_std_20)
+    target_include_directories(ambilight_capture_backend_smoke PRIVATE src)
+    target_link_libraries(ambilight_capture_backend_smoke PRIVATE
+        Qt6::Core Qt6::Gui d3d11 d3dcompiler dxgi user32 windowsapp)
+    target_compile_definitions(ambilight_capture_backend_smoke PRIVATE
+        NOMINMAX WIN32_LEAN_AND_MEAN)
+    if(MSVC)
+        target_compile_options(ambilight_capture_backend_smoke PRIVATE /utf-8 /W4 /Zi)
+        target_link_options(ambilight_capture_backend_smoke PRIVATE /DEBUG /MAP)
+    endif()
+
     add_executable(ambilight_audio_spectrum_tests
         src/audio/audio_spectrum.cpp
         src/audio/audio_spectrum.hpp
