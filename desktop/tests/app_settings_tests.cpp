@@ -60,6 +60,35 @@ bool testDefaults()
         && expect(settings.ambientTimeoutMs == 1000, "default stream timeout");
 }
 
+bool testMirrorSettings()
+{
+    QTemporaryDir directory;
+    if (!directory.isValid()) return false;
+    QSettings storage(directory.filePath(QStringLiteral("mirror.ini")), QSettings::IniFormat);
+    ambilight::AppSettings settings;
+    for (int fill = 0; fill <= 3; ++fill) {
+        settings.mirrorFillMode = fill;
+        settings.mirrorContentFormat = fill;
+        settings.mirrorFps = fill == 0 ? 24 : fill == 1 ? 25 : fill == 2 ? 30 : 60;
+        settings.mirrorBlurPercent = 42;
+        settings.mirrorBackgroundBrightness = 65;
+        if (!settings.save(storage)) return false;
+        const auto restored = ambilight::AppSettings::load(storage);
+        if (!expect(restored.mirrorFillMode == fill && restored.mirrorContentFormat == fill
+                && restored.mirrorFps == settings.mirrorFps && restored.mirrorBlurPercent == 42
+                && restored.mirrorBackgroundBrightness == 65,
+                "mirror fill/crop/brightness/blur and FPS survive restart")) return false;
+    }
+    settings.mirrorFillMode = -1;
+    settings.mirrorContentFormat = 99;
+    settings.mirrorBlurPercent = -5;
+    settings.mirrorBackgroundBrightness = 999;
+    settings.normalize();
+    return expect(settings.mirrorFillMode == 0 && settings.mirrorContentFormat == 0
+        && settings.mirrorBlurPercent == 0 && settings.mirrorBackgroundBrightness == 100,
+        "invalid mirror settings normalized safely");
+}
+
 bool testWindowCaptureMethodPersistence()
 {
     QTemporaryDir directory;
@@ -448,6 +477,7 @@ bool testCurrentLimitAccountsForIdleDraw()
 int main()
 {
     const bool success = testDefaults()
+        && testMirrorSettings()
         && testWindowCaptureMethodPersistence()
         && testNormalization()
         && testRoundTrip()

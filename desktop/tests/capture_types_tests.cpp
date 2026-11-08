@@ -497,6 +497,17 @@ bool testMirrorGeometryAndCadence()
         && std::abs(content.top() - 276.27907) < 0.001, "ultrawide letterbox preserves aspect ratio");
     success &= expect(mirrorContentRect({}, {1920, 1080}).isEmpty(), "invalid mirror source rejected");
     success &= expect(mirrorContentRect({1920, 1080}, {1920, 1080}) == QRectF(0, 0, 1920, 1080), "matching aspect fills destination");
+    success &= expect(mirrorSourceRect({3440, 1440}, 0) == QRectF(0, 0, 3440, 1440), "source preserved by default");
+    success &= expect(mirrorSourceRect({}, 3).isEmpty(), "invalid crop source");
+    for (const QSize size : {QSize(3840, 2160), QSize(1080, 1920), QSize(3440, 1440)}) {
+        for (int format = 1; format <= 3; ++format) {
+            const auto crop = mirrorSourceRect(size, format);
+            const double ratio = format == 1 ? 16.0 / 9.0 : format == 2 ? 21.0 / 9.0 : 2.39;
+            success &= expect(QRectF(QPointF{}, QSizeF(size)).contains(crop)
+                && std::abs(crop.width() / crop.height() - ratio) < 0.0001,
+                "center crop is bounded and matches selected film format");
+        }
+    }
     auto source = makeOutput(QStringLiteral("source"), QStringLiteral("DISPLAY1"), true);
     auto target = makeOutput(QStringLiteral("target"), QStringLiteral("DISPLAY2"), false);
     source.geometry = {0, 0, 3440, 1440};
@@ -524,6 +535,27 @@ bool testMirrorGeometryAndCadence()
     success &= expect(colors >= 299 && colors <= 301, "60 Hz mirror retains 30 Hz color budget");
     gate.advance(100'000'000'000LL, 30);
     success &= expect(!gate.due(100'000'000'001LL), "stall does not produce catch-up work");
+    for (int fps : {15, 24, 25, 30, 50, 60}) {
+        CaptureRateGate mirror;
+        int frames = 0;
+        // Poll every millisecond with a periodically busy output. A failed
+        // attempt is retried, not counted as a whole frame interval.
+        for (qint64 ms = 0; ms < 10'000; ++ms) {
+            const qint64 now = ms * 1'000'000;
+            if (!mirror.due(now)) continue;
+            if (ms % 97 == 0) { mirror.retry(now); continue; }
+            ++frames;
+            mirror.advance(now, fps);
+        }
+        success &= expect(frames > fps * 9.5 && frames <= fps * 10 + 1,
+            "selected mirror rate is respected despite brief output contention");
+    }
+    configuration.mirrorOutputId = QStringLiteral("target");
+    configuration.mirrorFillMode = 9;
+    success &= expectInvalid(configuration, "invalid fill mode rejected");
+    configuration.mirrorFillMode = 2;
+    configuration.mirrorBlurPercent = 101;
+    success &= expectInvalid(configuration, "invalid blur rejected");
     return success;
 }
 

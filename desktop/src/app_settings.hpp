@@ -18,6 +18,10 @@ struct AppSettings final {
     QString captureMethod = QStringLiteral("dxgi");
     QString mirrorOutputId;
     int mirrorFps = 60;
+    int mirrorFillMode = 0;
+    int mirrorBlurPercent = 60;
+    int mirrorBackgroundBrightness = 70;
+    int mirrorContentFormat = 0;
     int targetFps = 60;
     bool gamingMode = false;
     int samplingZones = 300;

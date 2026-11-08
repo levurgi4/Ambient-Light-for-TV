@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QSize>
+#include "capture_types.hpp"
 #include <d3d11.h>
 #include <dxgi1_3.h>
 #include <wrl/client.h>
@@ -16,7 +17,7 @@ public:
     void reset() noexcept;
     HRESULT prepare(bool* ready);
     HRESULT present(ID3D11ShaderResourceView* source, QSize logicalSize,
-        UINT rotation, bool* presented);
+        UINT rotation, bool* presented, const CaptureConfiguration& options = {});
 
 private:
     Microsoft::WRL::ComPtr<ID3D11Device> device_;
@@ -27,6 +28,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D11PixelShader> pixel_;
     Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler_;
     Microsoft::WRL::ComPtr<ID3D11Buffer> parameters_;
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> backgroundTargets_[2];
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> backgroundViews_[2];
+    QSize backgroundSize_;
     HWND window_ = nullptr;
     HANDLE available_ = nullptr;
     QSize size_;

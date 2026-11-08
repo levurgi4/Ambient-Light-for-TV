@@ -1247,7 +1247,8 @@ public:
                 result = selection->output->GetDesc(&description);
                 if (SUCCEEDED(result)) {
                     result = wgc_.initialize(
-                        device_.Get(), description.Monitor, configuration.captureFps(), errorMessage,
+                        device_.Get(), description.Monitor,
+                        configuration.mirrorWindow ? 0 : configuration.captureFps(), errorMessage,
                         reinterpret_cast<HWND>(configuration.sourceWindow), configuration.sourceWindowProcessId);
                 }
             }
@@ -1312,6 +1313,7 @@ public:
         releaseDuplicationFrame();
         lastFrameSize_ = {};
         mirrorPending_ = false;
+        mirrorOptions_ = {-1, -1, -1, -1};
         sampleView_.Reset();
         sampleTexture_.Reset();
         sampleWidth_ = 0;
@@ -1340,6 +1342,13 @@ public:
         const bool mirrorDue)
     {
         CapturedFrame captured;
+        const std::array<int, 4> mirrorOptions{configuration.mirrorFillMode,
+            configuration.mirrorContentFormat, configuration.mirrorBlurPercent,
+            configuration.mirrorBackgroundBrightness};
+        if (configuration.mirrorWindow && mirrorOptions != mirrorOptions_) {
+            mirrorOptions_ = mirrorOptions;
+            if (sampleView_) mirrorPending_ = true; // repaint paused videos too
+        }
         if (!consumeReadbacks(configuration, detector, captured)) return captured;
         if (!sampleColors && !mirrorDue) {
             // Drain readback, but leave a final source update in the capture pool
@@ -1375,7 +1384,8 @@ public:
         const HRESULT releaseResult = releaseDuplicationFrame();
         captured.sourcePolled = true;
         const HRESULT acquireResult = useWgc_
-            ? wgc_.acquire(desktopTexture.GetAddressOf(), configuration.captureFps(),
+            ? wgc_.acquire(desktopTexture.GetAddressOf(),
+                configuration.mirrorWindow ? 0 : configuration.captureFps(),
                 &captured.errorMessage)
             : FAILED(releaseResult) ? releaseResult
             : duplication_->AcquireNextFrame(0, &frameInformation,
@@ -1390,7 +1400,7 @@ public:
                 HRESULT hr = mirror_.prepare(&ready);
                 if (SUCCEEDED(hr) && ready)
                     hr = mirror_.present(sampleView_.Get(), lastFrameSize_,
-                        shaderRotation(duplicationDescription_.Rotation), &captured.mirrored);
+                        shaderRotation(duplicationDescription_.Rotation), &captured.mirrored, configuration);
                 if (FAILED(hr)) {
                     captured.error = hr;
                     captured.errorMessage = QStringLiteral("Mirror retry failed: %1").arg(hresultText(hr));
@@ -1491,7 +1501,7 @@ public:
                 return captured;
             }
         }
-        if (!mirrorDue && !mirrorPending_
+        if (configuration.mirrorWindow == 0
             && configuration.blackBarDetectionMode == BlackBarDetectionMode::Off) {
             const int depth = resolvedSamplingDepthPixels(
                 captured.frameSize, {}, configuration.samplingDepthPixels);
@@ -1510,14 +1520,14 @@ public:
         } else {
             context_->CopyResource(sampleTexture_.Get(), desktopTexture.Get());
         }
-        if (mirrorDue) mirrorPending_ = true;
+        if (configuration.mirrorWindow != 0) mirrorPending_ = true;
         sampleTimestamp_ = QDateTime::currentMSecsSinceEpoch();
         sampleConfiguration_ = configuration;
         pendingColorSample_ = configuration.processLedColors;
 
         if (mirrorReady) {
             result = mirror_.present(sampleView_.Get(), captured.frameSize,
-                shaderRotation(duplicationDescription_.Rotation), &captured.mirrored);
+                shaderRotation(duplicationDescription_.Rotation), &captured.mirrored, configuration);
             if (captured.mirrored) mirrorPending_ = false;
             if (FAILED(result)) {
                 captured.error = result;
@@ -1988,6 +1998,7 @@ private:
     HMONITOR mirrorTargetMonitor_ = nullptr;
     QRect mirrorSourceRect_;
     bool mirrorPending_ = false;
+    std::array<int, 4> mirrorOptions_{-1, -1, -1, -1};
     bool useWgc_ = false;
     bool duplicationFrameHeld_ = false;
     QSize lastFrameSize_;
@@ -2240,7 +2251,19 @@ private:
         CapturedFrame captured =
             backend_.capture(configuration_, detector_, runProbe, colorsDue, mirrorDue);
         if (colorsDue) colorGate_.advance(frameStartedNanoseconds, configuration_.targetFps);
-        if (mirrorDue) mirrorGate_.advance(frameStartedNanoseconds, configuration_.mirrorFps);
+        if (mirrorDue) {
+            if (captured.mirrored) {
+                mirrorGate_.advance(frameStartedNanoseconds, configuration_.mirrorFps);
+                mirrorIdlePolls_ = 0;
+            } else {
+                // Do not turn an unlucky vblank phase into a permanent half-rate
+                // output. Back off on static sources; never busy-spin or redraw
+                // an unchanged frame simply to inflate the FPS counter.
+                mirrorIdlePolls_ = std::min(17, mirrorIdlePolls_ + 1);
+                mirrorGate_.retry(frameStartedNanoseconds,
+                    mirrorIdlePolls_ > 16 ? 8'000'000 : 2'000'000);
+            }
+        }
         recordPipelineStatistics(captured, mirrorDue, processingClock.nsecsElapsed() / 1'000'000.0);
 
         if (captured.result == FrameResult::WaitTimeout) {
@@ -2371,6 +2394,13 @@ private:
     {
         constexpr qint64 nanosecondsPerSecond = 1'000'000'000;
         constexpr qint64 nanosecondsPerMillisecond = 1'000'000;
+        if (configuration_.mirrorWindow != 0) {
+            const qint64 deadline = configuration_.processLedColors
+                ? std::min(colorGate_.deadline, mirrorGate_.deadline) : mirrorGate_.deadline;
+            return static_cast<int>(std::clamp<qint64>(
+                (deadline - pacingClock_.nsecsElapsed() + nanosecondsPerMillisecond - 1)
+                    / nanosecondsPerMillisecond, 0, 1000));
+        }
         const int targetFps = std::max(1, configuration_.captureFps());
 
         if (pacingTargetFps_ != targetFps
@@ -2421,6 +2451,7 @@ private:
         colorGate_ = {};
         mirrorGate_ = {};
         pipelineStats_ = {};
+        mirrorIdlePolls_ = 0;
         pipelineClock_.invalidate();
         sourceFramesInWindow_ = submittedFramesInWindow_ = 0;
         frameNumber_ = 0;
@@ -2548,6 +2579,7 @@ private:
     quint64 lastStatusGeneration_ = 0;
     QElapsedTimer fpsClock_;
     CaptureRateGate colorGate_, mirrorGate_;
+    int mirrorIdlePolls_ = 0;
     CapturePipelineStatistics pipelineStats_;
     QElapsedTimer pipelineClock_;
     quint64 sourceFramesInWindow_ = 0, submittedFramesInWindow_ = 0;

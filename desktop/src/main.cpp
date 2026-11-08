@@ -188,7 +188,7 @@ int main(int argc, char* argv[])
     QCoreApplication::setOrganizationName(QStringLiteral("Levurgi4"));
     QCoreApplication::setOrganizationDomain(QStringLiteral("levurgi4.local"));
     QCoreApplication::setApplicationName(QStringLiteral("Ambilight by Levurgi4"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("0.2.11"));
+    QCoreApplication::setApplicationVersion(QStringLiteral("0.2.12"));
     QApplication::setQuitOnLastWindowClosed(false);
     application.setWindowIcon(
         QIcon(QStringLiteral(":/ambilight/branding/app-icon.png")));

@@ -214,6 +214,12 @@ struct CaptureConfiguration final {
     quintptr mirrorWindow = 0;
     QString mirrorOutputId;
     int mirrorFps = 60;
+    // 0: black, 1: blurred edge extension, 2: reflected edges, 3: blurred cover.
+    int mirrorFillMode = 0;
+    int mirrorBlurPercent = 60;
+    int mirrorBackgroundBrightness = 70;
+    // 0: entire source, 1: 16:9, 2: 21:9, 3: cinema 2.39:1.
+    int mirrorContentFormat = 0;
 
     [[nodiscard]] int captureFps() const noexcept {
         return mirrorWindow != 0
@@ -259,6 +265,12 @@ struct CaptureConfiguration final {
             topLedCount, rightLedCount, bottomLedCount, leftLedCount};
         if (mirrorFps < 15 || mirrorFps > 60) {
             return reject(QStringLiteral("Mirror FPS must be between 15 and 60."));
+        }
+        if (mirrorFillMode < 0 || mirrorFillMode > 3
+            || mirrorContentFormat < 0 || mirrorContentFormat > 3
+            || mirrorBlurPercent < 0 || mirrorBlurPercent > 100
+            || mirrorBackgroundBrightness < 0 || mirrorBackgroundBrightness > 100) {
+            return reject(QStringLiteral("Invalid mirror fill settings."));
         }
         if ((sourceWindow == 0) != (sourceWindowProcessId == 0)
             || (sourceWindow != 0 && !useWindowsGraphicsCapture)) {

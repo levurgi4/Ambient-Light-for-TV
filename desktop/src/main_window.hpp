@@ -264,6 +264,14 @@ private:
     QComboBox* mirrorTargetCombo_ = nullptr;
     QComboBox* mirrorMethodCombo_ = nullptr;
     QSpinBox* mirrorFpsSpin_ = nullptr;
+    QComboBox* mirrorFillCombo_ = nullptr;
+    QComboBox* mirrorFormatCombo_ = nullptr;
+    QSpinBox* mirrorBlurSpin_ = nullptr;
+    QSpinBox* mirrorBrightnessSpin_ = nullptr;
+    QLabel* mirrorFillLabel_ = nullptr;
+    QLabel* mirrorFormatLabel_ = nullptr;
+    QLabel* mirrorBlurLabel_ = nullptr;
+    QLabel* mirrorBrightnessLabel_ = nullptr;
     QPushButton* mirrorStartButton_ = nullptr;
     QPushButton* mirrorRefreshButton_ = nullptr;
     QPushButton* mirrorHelpButton_ = nullptr;

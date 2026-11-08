@@ -71,6 +71,10 @@ void AppSettings::normalize()
     captureOutputId = captureOutputId.trimmed();
     mirrorOutputId = mirrorOutputId.trimmed();
     mirrorFps = std::clamp(mirrorFps, 15, 60);
+    if (mirrorFillMode < 0 || mirrorFillMode > 3) mirrorFillMode = 0;
+    if (mirrorContentFormat < 0 || mirrorContentFormat > 3) mirrorContentFormat = 0;
+    mirrorBlurPercent = std::clamp(mirrorBlurPercent, 0, 100);
+    mirrorBackgroundBrightness = std::clamp(mirrorBackgroundBrightness, 0, 100);
     audioOutputDeviceId = audioOutputDeviceId.trimmed();
     audioInputDeviceId = audioInputDeviceId.trimmed();
 
@@ -234,6 +238,10 @@ AppSettings AppSettings::load(QSettings& settings)
     result.captureMethod = valueOr(settings, "captureMethod", result.captureMethod);
     result.mirrorOutputId = valueOr(settings, "mirrorOutputId", result.mirrorOutputId);
     result.mirrorFps = valueOr(settings, "mirrorFps", result.mirrorFps);
+    result.mirrorFillMode = valueOr(settings, "mirrorFillMode", result.mirrorFillMode);
+    result.mirrorContentFormat = valueOr(settings, "mirrorContentFormat", result.mirrorContentFormat);
+    result.mirrorBlurPercent = valueOr(settings, "mirrorBlurPercent", result.mirrorBlurPercent);
+    result.mirrorBackgroundBrightness = valueOr(settings, "mirrorBackgroundBrightness", result.mirrorBackgroundBrightness);
     result.targetFps = valueOr(settings, "targetFps", result.targetFps);
     result.gamingMode = valueOr(settings, "gamingMode", result.gamingMode);
     result.samplingZones = valueOr(settings, "samplingZones", result.samplingZones);
@@ -366,6 +374,10 @@ bool AppSettings::save(QSettings& settings) const
     settings.setValue(QStringLiteral("captureMethod"), captureMethod);
     settings.setValue(QStringLiteral("mirrorOutputId"), mirrorOutputId);
     settings.setValue(QStringLiteral("mirrorFps"), mirrorFps);
+    settings.setValue(QStringLiteral("mirrorFillMode"), mirrorFillMode);
+    settings.setValue(QStringLiteral("mirrorContentFormat"), mirrorContentFormat);
+    settings.setValue(QStringLiteral("mirrorBlurPercent"), mirrorBlurPercent);
+    settings.setValue(QStringLiteral("mirrorBackgroundBrightness"), mirrorBackgroundBrightness);
     settings.setValue(QStringLiteral("gamingMode"), gamingMode);
     settings.setValue(QStringLiteral("samplingZones"), samplingZones);
     settings.setValue(

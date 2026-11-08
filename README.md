@@ -194,7 +194,7 @@ cmake --install out/build/windows-release --config Release --prefix $installDir
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-    .\tools\package_windows.ps1 -Version 0.2.11
+    .\tools\package_windows.ps1 -Version 0.2.12
 ```
 
 Архив и его контрольная сумма появятся в `out\packages`. В portable-комплект

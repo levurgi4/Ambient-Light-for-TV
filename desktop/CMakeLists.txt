@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    project(AmbilightDesktop VERSION 0.2.11 LANGUAGES CXX)
+    project(AmbilightDesktop VERSION 0.2.12 LANGUAGES CXX)
     include(CTest)
 endif()
 
@@ -132,6 +132,15 @@ install(SCRIPT ${ambilight_deploy_script})
 if(BUILD_TESTING)
     add_executable(ambilight_mirror_presenter_smoke EXCLUDE_FROM_ALL
         src/capture/gpu_mirror_presenter.cpp tests/mirror_presenter_smoke.cpp)
+    add_executable(ambilight_mirror_stream_smoke EXCLUDE_FROM_ALL
+        src/capture/gpu_mirror_presenter.cpp src/capture/wgc_frame_source.cpp tests/mirror_stream_smoke.cpp)
+    target_compile_features(ambilight_mirror_stream_smoke PRIVATE cxx_std_20)
+    target_include_directories(ambilight_mirror_stream_smoke PRIVATE src)
+    target_link_libraries(ambilight_mirror_stream_smoke PRIVATE Qt6::Widgets d3d11 d3dcompiler dxgi windowsapp)
+    target_compile_definitions(ambilight_mirror_stream_smoke PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    if(MSVC)
+        target_compile_options(ambilight_mirror_stream_smoke PRIVATE /utf-8 /W4 /permissive-)
+    endif()
     target_compile_features(ambilight_mirror_presenter_smoke PRIVATE cxx_std_20)
     target_include_directories(ambilight_mirror_presenter_smoke PRIVATE src)
     target_link_libraries(ambilight_mirror_presenter_smoke PRIVATE Qt6::Widgets d3d11 d3dcompiler dxgi)

@@ -745,6 +745,22 @@ void MainWindow::buildMirrorTab()
     mirrorCaptureWindowButton_ = new QPushButton(mirrorPage_);
     form->addRow(QString(), mirrorCaptureWindowButton_);
     form->addRow(mirrorFpsLabel_, mirrorFpsSpin_);
+    mirrorFillCombo_ = new QComboBox(mirrorPage_);
+    mirrorFormatCombo_ = new QComboBox(mirrorPage_);
+    for (int index = 0; index < 4; ++index) {
+        mirrorFillCombo_->addItem(QString(), index);
+        mirrorFormatCombo_->addItem(QString(), index);
+    }
+    mirrorBlurSpin_ = makeSpinBox(mirrorPage_, 0, 100, QStringLiteral(" %"));
+    mirrorBrightnessSpin_ = makeSpinBox(mirrorPage_, 0, 100, QStringLiteral(" %"));
+    mirrorFillLabel_ = new QLabel(mirrorPage_);
+    mirrorFormatLabel_ = new QLabel(mirrorPage_);
+    mirrorBlurLabel_ = new QLabel(mirrorPage_);
+    mirrorBrightnessLabel_ = new QLabel(mirrorPage_);
+    form->addRow(mirrorFormatLabel_, mirrorFormatCombo_);
+    form->addRow(mirrorFillLabel_, mirrorFillCombo_);
+    form->addRow(mirrorBlurLabel_, mirrorBlurSpin_);
+    form->addRow(mirrorBrightnessLabel_, mirrorBrightnessSpin_);
     layout->addLayout(form);
     auto* buttons = new QHBoxLayout();
     mirrorStartButton_ = new QPushButton(mirrorPage_);
@@ -772,7 +788,7 @@ void MainWindow::updateMirrorUi()
     const bool mirrorBusy = mirrorRunning_ || mirrorStopping_;
     const bool windowCapture = comboValue(captureMethodCombo_) == QStringLiteral("wgc_window");
     const QString windowButtonText = captureWindowHandle_ == 0
-        ? text("Select game window…", "Выбрать окно игры…")
+        ? text("Select window…", "Выбрать окно…")
         : text("Window: %1 — change…", "Окно: %1 — изменить…").arg(captureWindowTitle_.left(48));
     for (auto* button : {captureWindowButton_, mirrorCaptureWindowButton_}) {
         button->setText(windowButtonText);
@@ -780,22 +796,43 @@ void MainWindow::updateMirrorUi()
         button->setVisible(windowCapture);
         button->setEnabled(!mirrorBusy);
     }
-    captureMethodCombo_->setItemText(2, text("WGC — game window", "WGC — окно игры"));
-    mirrorMethodCombo_->setItemText(2, text("WGC — game window", "WGC — окно игры"));
+    captureMethodCombo_->setItemText(2, text("WGC — application window", "WGC — окно приложения"));
+    mirrorMethodCombo_->setItemText(2, text("WGC — application window", "WGC — окно приложения"));
     tabs_->setTabText(tabs_->indexOf(mirrorPage_), text("Mirroring", "Зеркалирование"));
     mirrorHintLabel_->setText(text(
-        "Experimental mirror without blur. Works without lighting or ESP32. Select Extend with Win+P first. "
+        "TV mirror for videos and movies, independent of lighting and ESP32. Select Extend with Win+P first. "
         "Both displays must use the same GPU. Source and capture method are shared with Ambilight. "
-        "Full-frame copies are needed even in Game mode. Extra GPU load and TV latency are possible. "
-        "No automatic start or display-mode changes.",
-        "Экспериментальное зеркало без размытия. Работает без подсветки и ESP32. Сначала выберите «Расширить» через Win+P. "
+        "Only the TV image is changed. GPU-intensive games are not a supported performance target.",
+        "Зеркало ТВ для видео и фильмов, независимо от подсветки и ESP32. Сначала выберите «Расширить» через Win+P. "
         "Оба экрана должны быть подключены к одной видеокарте. Источник и способ захвата общие с Ambilight. "
-        "Копируется полный кадр даже в игровом режиме. Возможны дополнительная нагрузка и задержка на ТВ. "
-        "Автозапуска и изменения раскладки Windows нет."));
+        "Меняется только изображение на ТВ. Работа в GPU-интенсивных играх пока не гарантируется."));
     mirrorSourceLabel_->setText(text("Source:", "Источник:"));
     mirrorTargetLabel_->setText(text("Destination (TV):", "Назначение (ТВ):"));
     mirrorMethodLabel_->setText(text("Capture method:", "Способ захвата:"));
     mirrorFpsLabel_->setText(text("Mirror frame rate:", "Частота зеркала:"));
+    mirrorFpsSpin_->setToolTip(text(
+        "Output limit, not frame interpolation. 24/25/30 FPS movies do not become 60 FPS. For smooth 60 FPS output, set the TV to 60 Hz in Windows.",
+        "Предел вывода, не интерполяция кадров. Фильм 24/25/30 FPS не станет 60 FPS. Для вывода 60 FPS выставьте на ТВ 60 Гц в Windows."));
+    mirrorFillLabel_->setText(text("Fill bars:", "Заполнение полос:"));
+    mirrorFormatLabel_->setText(text("Source content:", "Содержимое источника:"));
+    mirrorBlurLabel_->setText(text("Background blur:", "Размытие фона:"));
+    mirrorBrightnessLabel_->setText(text("Background brightness:", "Яркость фона:"));
+    mirrorFillCombo_->setItemText(0, text("Black bars — minimum load", "Чёрные полосы — минимум нагрузки"));
+    mirrorFillCombo_->setItemText(1, text("Blurred edges — low extra load", "Размытые края — небольшая доп. нагрузка"));
+    mirrorFillCombo_->setItemText(2, text("Reflected edges — low extra load", "Отражённые края — небольшая доп. нагрузка"));
+    mirrorFillCombo_->setItemText(3, text("Blurred enlarged background — low extra load", "Увеличенный размытый фон — небольшая доп. нагрузка"));
+    mirrorFormatCombo_->setItemText(0, text("Entire source (no crop)", "Весь источник (без обрезки)"));
+    mirrorFormatCombo_->setItemText(1, text("16:9 — center crop", "16:9 — обрезка по центру"));
+    mirrorFormatCombo_->setItemText(2, text("21:9 — center crop", "21:9 — обрезка по центру"));
+    mirrorFormatCombo_->setItemText(3, text("Cinema 2.39:1 — center crop", "Кино 2.39:1 — обрезка по центру"));
+    mirrorFormatCombo_->setToolTip(text(
+        "Leave Entire source for 3440×1440. If black bars are baked into the video, choose its aspect ratio. Cropping may remove subtitles or player controls; it affects only the TV.",
+        "Для 3440×1440 оставьте «Весь источник». Если полосы уже внутри видео, выберите формат фильма. Обрезка может скрыть субтитры или панель плеера; она действует только на ТВ."));
+    mirrorBlurSpin_->setEnabled(mirrorFillCombo_->currentIndex() != 0 && !mirrorStopping_);
+    mirrorBrightnessSpin_->setEnabled(mirrorFillCombo_->currentIndex() != 0 && !mirrorStopping_);
+    mirrorFillCombo_->setEnabled(!mirrorStopping_);
+    mirrorFormatCombo_->setEnabled(!mirrorStopping_);
+    mirrorFpsSpin_->setEnabled(!mirrorStopping_);
     mirrorStartButton_->setText(mirrorRunning_ ? text("Stop", "Остановить") : text("Start mirror", "Запустить зеркало"));
     mirrorRefreshButton_->setText(text("Refresh displays", "Обновить экраны"));
     mirrorHelpButton_->setText(text("Help", "Справка"));
@@ -823,7 +860,7 @@ void MainWindow::toggleMirror(const bool enabled)
         && captureWindowHandle_ == 0) {
         const QSignalBlocker blocker(mirrorStartButton_);
         mirrorStartButton_->setChecked(false);
-        mirrorStatusLabel_->setText(text("Select the game window first.", "Сначала выберите окно игры."));
+        mirrorStatusLabel_->setText(text("Select the source window first.", "Сначала выберите окно-источник."));
         return;
     }
     const auto* source = capture::resolveCaptureOutput(captureOutputs_, comboValue(captureOutputCombo_));
@@ -1278,35 +1315,50 @@ void MainWindow::connectSignals()
     connect(mirrorFpsSpin_, &QSpinBox::valueChanged, this, [this] {
         scheduleCaptureUpdate(); saveTimer_->start();
     });
+    for (auto* combo : {mirrorFillCombo_, mirrorFormatCombo_}) {
+        connect(combo, &QComboBox::currentIndexChanged, this, [this] {
+            updateMirrorUi(); scheduleCaptureUpdate(); saveTimer_->start();
+        });
+    }
+    for (auto* spin : {mirrorBlurSpin_, mirrorBrightnessSpin_}) {
+        connect(spin, &QSpinBox::valueChanged, this, [this] {
+            scheduleCaptureUpdate(); saveTimer_->start();
+        });
+    }
     connect(mirrorTargetCombo_, &QComboBox::currentIndexChanged, saveTimer_, qOverload<>(&QTimer::start));
     connect(mirrorHelpButton_, &QPushButton::clicked, this, [this] {
         QMessageBox::information(this, text("TV mirror", "Зеркало ТВ"), text(
             "1. Win+P > Extend.\n2. Select the source monitor and destination TV.\n3. Start the mirror; lighting may stay off.\n"
-            "If a game is not captured, try WGC. Keep the game on the source display.\n"
-            "This first version preserves aspect ratio with black bars (no blur), SDR only; the separate system cursor is not drawn. "
+            "For a player or browser, try WGC — application window; keep it open and not minimized on the source display.\n"
+            "Fill: black bars, blurred edges, reflected edges, or an enlarged blurred background. Blur and brightness affect only the background. "
+            "The original aspect ratio is preserved. If the video already contains bars, select its content format (center crop; subtitles may be cropped).\n"
+            "SDR only; protected streaming video may not be captured. No audio forwarding or frame interpolation. "
             "Stop here or from the tray. Closing the application stops the mirror. "
-            "Display topology changes stop it for safety. Compare game FPS and TV delay against Windows Duplicate.",
+            "Display topology changes stop it for safety. Set the TV to 60 Hz in Windows for 60 FPS output. GPU-intensive games are not the target.",
             "1. Win+P → Расширить.\n2. Выберите монитор-источник и ТВ-назначение.\n3. Запустите зеркало; подсветку можно выключить.\n"
-            "Если игра не захватывается, попробуйте WGC. Игра должна оставаться на экране-источнике.\n"
-            "Первая версия сохраняет пропорции с чёрными полосами (без размытия), только SDR; отдельный системный курсор не выводится. "
+            "Для плеера или браузера попробуйте «WGC — окно приложения»; оставьте его открытым и не сворачивайте на экране-источнике.\n"
+            "Заполнение: чёрные полосы, размытые края, отражённые края или увеличенный размытый фон. Размытие и яркость меняют только фон. "
+            "Пропорции сохраняются. Если полосы уже внутри видео, выберите формат содержимого (обрезка по центру; может обрезать субтитры).\n"
+            "Только SDR; защищённое потоковое видео может не захватываться. Передачи звука и интерполяции кадров нет. "
             "Остановка — здесь или через трей. Выход из приложения завершает зеркало. "
-            "Изменение конфигурации экранов останавливает его для безопасности. Сравните FPS игры и задержку на ТВ с режимом «Дублировать»."));
+            "Изменение конфигурации экранов останавливает его для безопасности. Для 60 FPS установите на ТВ 60 Гц в Windows. GPU-интенсивные игры пока вне целевого сценария."));
     });
     if (stopMirrorAction_) connect(stopMirrorAction_, &QAction::triggered, this, &MainWindow::stopMirror);
     connect(captureWorker_, &capture::ScreenCaptureWorker::pipelineStatistics, this,
         [this](const capture::CapturePipelineStatistics& statistics) {
             capturePipelineStatistics_ = statistics;
             if (mirrorRunning_) mirrorStatusLabel_->setText(text(
-                "Source: %1 FPS · submitted to Windows: %2 FPS (not measured TV FPS)\n"
+                "Limit: %9 FPS · source: %1 FPS · submitted to Windows: %2 FPS (not measured TV FPS)\n"
                 "Submitted: %3 · output busy: %4 · no new frame: %5 polls · GPU busy: %6 polls\n"
                 "Source age: %7 ms · last processing: %8 ms (not TV latency)",
-                "Источник: %1 FPS · передано Windows: %2 FPS (не замер FPS телевизора)\n"
+                "Лимит: %9 FPS · источник: %1 FPS · передано Windows: %2 FPS (не замер FPS телевизора)\n"
                 "Передано: %3 · вывод занят: %4 · нет нового кадра: %5 проверок · GPU занят: %6 проверок\n"
                 "Возраст кадра: %7 мс · последняя обработка: %8 мс (не задержка ТВ)")
                 .arg(statistics.sourceFps, 0, 'f', 1).arg(statistics.submittedFps, 0, 'f', 1)
                 .arg(statistics.submittedFrames).arg(statistics.outputBusyFrames)
                 .arg(statistics.noFramePolls).arg(statistics.gpuBusyPolls)
-                .arg(statistics.sourceAgeMilliseconds).arg(statistics.lastProcessingMilliseconds, 0, 'f', 2));
+                .arg(statistics.sourceAgeMilliseconds).arg(statistics.lastProcessingMilliseconds, 0, 'f', 2)
+                .arg(mirrorFpsSpin_->value()));
             updateDiagnostics();
         });
     connect(tabs_, &QTabWidget::currentChanged, this, [this] {
@@ -1928,6 +1980,10 @@ void MainWindow::applySettings(const AppSettings& value)
     fpsSpin_->setValue(value.targetFps);
     selectComboValue(captureMethodCombo_, value.captureMethod);
     mirrorFpsSpin_->setValue(value.mirrorFps);
+    mirrorFillCombo_->setCurrentIndex(value.mirrorFillMode);
+    mirrorFormatCombo_->setCurrentIndex(value.mirrorContentFormat);
+    mirrorBlurSpin_->setValue(value.mirrorBlurPercent);
+    mirrorBrightnessSpin_->setValue(value.mirrorBackgroundBrightness);
     if (!value.mirrorOutputId.isEmpty()) {
         if (mirrorTargetCombo_->findData(value.mirrorOutputId) < 0)
             mirrorTargetCombo_->addItem(text("Unavailable display (%1)", "Недоступный экран (%1)")
@@ -2048,6 +2104,10 @@ AppSettings MainWindow::settingsFromUi() const
     value.captureMethod = comboValue(captureMethodCombo_);
     value.mirrorOutputId = mirrorTargetCombo_->currentData().toString();
     value.mirrorFps = mirrorFpsSpin_->value();
+    value.mirrorFillMode = mirrorFillCombo_->currentIndex();
+    value.mirrorContentFormat = mirrorFormatCombo_->currentIndex();
+    value.mirrorBlurPercent = mirrorBlurSpin_->value();
+    value.mirrorBackgroundBrightness = mirrorBrightnessSpin_->value();
     value.gamingMode = gamingModeCheck_->isChecked();
     value.samplingZones = zonesSpin_->value();
     value.regionColorMode = comboValue(regionColorModeCombo_);
@@ -2995,11 +3055,11 @@ void MainWindow::updateSamplingDepthUi()
     captureMethodCombo_->setItemText(0, QStringLiteral("DXGI Desktop Duplication"));
     captureMethodCombo_->setItemText(1, QStringLiteral("Windows Graphics Capture"));
     captureMethodHintLabel_->setText(text(
-        "WGC — game window captures the selected application instead of the whole monitor. "
-        "Start the game, select its window, and keep it restored. Select it again after restarting "
-        "or moving the game to another display. Windows may show a capture border.",
-        "«WGC — окно игры» захватывает выбранное приложение, а не весь монитор. "
-        "Запустите игру, выберите её окно и не сворачивайте его. После перезапуска игры "
+        "WGC — application window captures the selected player, browser or game instead of the whole monitor. "
+        "Select its window and keep it restored. Select it again after restarting "
+        "or moving the application to another display. Windows may show a capture border.",
+        "«WGC — окно приложения» захватывает выбранный плеер, браузер или игру, а не весь монитор. "
+        "Выберите окно и не сворачивайте его. После перезапуска приложения "
         "или переноса на другой экран выберите окно заново. Windows может показывать рамку захвата."));
     const bool gaming = gamingModeCheck_->isChecked();
     gamingModeCheck_->setText(text("Game mode (lower GPU load)",
@@ -3791,7 +3851,7 @@ void MainWindow::selectCaptureWindow()
             .arg(window.processId).arg(reinterpret_cast<quintptr>(window.handle), 0, 16));
     }
     QInputDialog dialog(this);
-    dialog.setWindowTitle(text("Select game window", "Выбор окна игры"));
+    dialog.setWindowTitle(text("Select source window", "Выбор окна-источника"));
     dialog.setLabelText(text("WGC captures this window for both lighting and TV.\n"
         "Keep the game on the source monitor; do not minimize it.",
         "WGC захватит это окно для подсветки и ТВ.\n"
@@ -4686,13 +4746,17 @@ void MainWindow::updateCaptureConfiguration()
         configuration.mirrorWindow = static_cast<quintptr>(mirrorWindow_->winId());
         configuration.mirrorOutputId = comboValue(mirrorTargetCombo_);
         configuration.mirrorFps = mirrorFpsSpin_->value();
+        configuration.mirrorFillMode = mirrorFillCombo_->currentIndex();
+        configuration.mirrorContentFormat = mirrorFormatCombo_->currentIndex();
+        configuration.mirrorBlurPercent = mirrorBlurSpin_->value();
+        configuration.mirrorBackgroundBrightness = mirrorBrightnessSpin_->value();
     }
     configuration.outputId = comboValue(captureOutputCombo_);
     const bool windowCapture = comboValue(captureMethodCombo_) == QStringLiteral("wgc_window");
     if (windowCapture && captureWindowHandle_ == 0) {
         captureWorker_->stop();
         clearCapturedFrame();
-        captureStatusText_ = text("Select a game window for WGC capture.", "Выберите окно игры для захвата WGC.");
+        captureStatusText_ = text("Select an application window for WGC capture.", "Выберите окно приложения для захвата WGC.");
         ledPreview_->setStatus(captureStatusText_, false);
         updateDiagnostics();
         return;

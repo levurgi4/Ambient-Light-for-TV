@@ -3,7 +3,21 @@
 #include <QRectF>
 
 namespace ambilight::capture {
-inline QRectF mirrorContentRect(QSize source, QSize target)
+// Stable, explicit center crop. Does not chase dark scenes or subtitles.
+inline QRectF mirrorSourceRect(QSize source, int format)
+{
+    if (source.isEmpty()) return {};
+    const double aspect = format == 1 ? 16.0 / 9.0
+        : format == 2 ? 21.0 / 9.0 : format == 3 ? 2.39 : 0.0;
+    double width = source.width(), height = source.height();
+    if (aspect > 0) {
+        if (width / height > aspect) width = height * aspect;
+        else height = width / aspect;
+    }
+    return {(source.width() - width) / 2, (source.height() - height) / 2, width, height};
+}
+
+inline QRectF mirrorContentRect(QSizeF source, QSize target)
 {
     if (source.isEmpty() || target.isEmpty()) return {};
     const double scale = std::min(static_cast<double>(target.width()) / source.width(),
@@ -32,5 +46,8 @@ struct CaptureRateGate {
         deadline = (deadline == 0 || now - deadline > period)
             ? now + period : deadline + period;
     }
+    // A busy swap chain / empty producer is not a delivered frame. Retry
+    // without burning a whole 16/33 ms period. No catch-up burst on success.
+    void retry(qint64 now, qint64 delay = 2'000'000) { deadline = now + delay; }
 };
 }

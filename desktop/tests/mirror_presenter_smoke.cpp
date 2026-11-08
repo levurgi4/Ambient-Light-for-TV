@@ -13,6 +13,9 @@
 int main(int argc, char** argv)
 {
     QApplication app(argc, argv);
+    qInstallMessageHandler([](QtMsgType, const QMessageLogContext&, const QString& message) {
+        std::cerr << message.toStdString() << std::endl;
+    });
     using Microsoft::WRL::ComPtr;
     ambilight::MirrorWindow window(nullptr);
     window.setWindowFlag(Qt::WindowStaysOnTopHint, true);
@@ -43,13 +46,21 @@ int main(int argc, char** argv)
     if (FAILED(hr)) { std::cerr << "Initialization failed: " << std::hex << hr << '\n'; return 1; }
     int phase = 0;
     bool verifying = false;
+    const auto optionsForPhase = [&] {
+        ambilight::capture::CaptureConfiguration options;
+        options.mirrorFillMode = phase < 4 ? 0 : std::min(3, (phase - 4) / 4 + 1);
+        options.mirrorBackgroundBrightness = phase == 16 ? 0 : 70;
+        options.mirrorBlurPercent = phase == 17 ? 0 : 60;
+        options.mirrorContentFormat = phase == 18 ? 3 : 0;
+        return options;
+    };
     QTimer render;
     QObject::connect(&render, &QTimer::timeout, &app, [&] {
         bool ready = false, presented = false;
         HRESULT result = presenter.prepare(&ready);
         if (SUCCEEDED(result) && ready)
             result = presenter.present(view.Get(), (phase % 2) == 1 ? QSize(4, 8) : QSize(8, 4),
-                static_cast<UINT>(phase), &presented);
+                static_cast<UINT>(phase % 4), &presented, optionsForPhase());
         if (FAILED(result)) { std::cerr << "Render failed: " << std::hex << result << '\n'; app.exit(1); return; }
         if (!presented || verifying) return;
         verifying = true;
@@ -68,15 +79,17 @@ int main(int argc, char** argv)
             const QColor border = (phase % 2) == 1 ? at(.05, .5) : at(.5, .05);
             const auto red = [](QColor c) { return c.red() > c.green() + 30; };
             const auto green = [](QColor c) { return c.green() > c.red() + 30; };
-            const bool correct = phase >= 2 ? green(first) && red(second) : red(first) && green(second);
-            if (!correct || border.red() > 10 || border.green() > 10 || border.blue() > 10) {
+            const bool correct = (phase % 4) >= 2 ? green(first) && red(second) : red(first) && green(second);
+            const bool expectBlack = phase < 4 || phase == 16;
+            const bool black = border.red() <= 10 && border.green() <= 10 && border.blue() <= 10;
+            if (!correct || black != expectBlack) {
                 std::cerr << "Incorrect rendered colors/letterbox in phase " << phase
                     << ": " << first.name().toStdString() << ' ' << second.name().toStdString()
                     << ' ' << border.name().toStdString() << '\n';
                 app.exit(1); return;
             }
             std::cout << "Mirror phase " << phase << " pixels verified\n";
-            if (++phase == 4) { render.stop(); presenter.reset(); app.quit(); return; }
+            if (++phase == 19) { render.stop(); presenter.reset(); app.quit(); return; }
             if (phase == 1) window.resize(320, 320);
             if (phase == 2) {
                 window.hide();
@@ -93,6 +106,6 @@ int main(int argc, char** argv)
         });
     });
     render.start(16);
-    QTimer::singleShot(10000, &app, [&] { std::cerr << "Mirror test timeout\n"; app.exit(1); });
+    QTimer::singleShot(20000, &app, [&] { std::cerr << "Mirror test timeout\n"; app.exit(1); });
     return app.exec();
 }

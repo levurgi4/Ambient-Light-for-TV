@@ -22,7 +22,7 @@ struct WgcFrameSource::Impl {
     wgc::GraphicsCaptureSession session{nullptr};
     wgc::Direct3D11CaptureFrame frame{nullptr};
     graphics::SizeInt32 size{};
-    int targetFps = 0;
+    int targetFps = -1;
     HWND window = nullptr;
     HMONITOR sourceMonitor = nullptr;
     DWORD processId = 0;
@@ -35,9 +35,12 @@ struct WgcFrameSource::Impl {
         // the application still polls and processes at its selected FPS.
 #if defined(____x_ABI_CWindows_CGraphics_CCapture_CIGraphicsCaptureSession5_INTERFACE_DEFINED__)
         if (const auto pacing = session.try_as<wgc::IGraphicsCaptureSession5>()) {
+            // Mirror cadence is controlled by its consumer. A second strict
+            // producer limiter quantized to vblank can halve 60/59.94 Hz and
+            // distort 24/25 FPS. Zero disables that extra limiter for mirrors.
             const int rate = std::max(1, fps);
             pacing.MinUpdateInterval(winrt::Windows::Foundation::TimeSpan{
-                (10'000'000 + rate - 1) / rate});
+                fps == 0 ? 0 : std::max(0, 10'000'000 / rate - 10'000)});
         }
 #endif
         targetFps = fps;
@@ -85,7 +88,7 @@ HRESULT WgcFrameSource::initialize(
             if (!IsWindow(sourceWindow)
                 || !GetWindowThreadProcessId(sourceWindow, &processId)
                 || processId != sourceProcessId) {
-                if (error) *error = QStringLiteral("The selected window closed. Select the game window again.");
+                if (error) *error = QStringLiteral("The selected window closed. Select the source window again.");
                 return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
             }
             winrt::check_hresult(interop->CreateForWindow(sourceWindow,
@@ -131,7 +134,7 @@ HRESULT WgcFrameSource::acquire(
     if (impl_->window && (!IsWindow(impl_->window)
         || !GetWindowThreadProcessId(impl_->window, &processId)
         || processId != impl_->processId)) {
-        if (error) *error = QStringLiteral("The selected window closed. Select the game window again.");
+        if (error) *error = QStringLiteral("The selected window closed. Select the source window again.");
         return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
     }
     if (impl_->itemClosed && impl_->itemClosed->load(std::memory_order_relaxed)) {
@@ -143,7 +146,7 @@ HRESULT WgcFrameSource::acquire(
     }
     if (impl_->window && IsIconic(impl_->window)) return DXGI_ERROR_WAIT_TIMEOUT;
     if (impl_->window && MonitorFromWindow(impl_->window, MONITOR_DEFAULTTONEAREST) != impl_->sourceMonitor) {
-        if (error) *error = QStringLiteral("The game moved to another display. Select its window again.");
+        if (error) *error = QStringLiteral("The source moved to another display. Select its window again.");
         return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
     }
     try {
@@ -203,7 +206,7 @@ void WgcFrameSource::reset() noexcept
     impl_->item = nullptr;
     impl_->itemClosed.reset();
     impl_->device = nullptr;
-    impl_->targetFps = 0;
+    impl_->targetFps = -1;
     impl_->window = nullptr;
     impl_->sourceMonitor = nullptr;
     impl_->processId = 0;
