@@ -12,6 +12,7 @@
 #include <array>
 #include <iostream>
 #include <vector>
+#include <windows.h>
 
 class TestWindow final : public QWindow {
 public:
@@ -46,6 +47,7 @@ private:
 int main(int argc, char** argv)
 {
     QGuiApplication app(argc, argv);
+    app.setQuitOnLastWindowClosed(false);
     using namespace ambilight::capture;
     TestWindow window;
     window.show();
@@ -65,6 +67,7 @@ int main(int argc, char** argv)
         BlackBarDetectionMode bars;
         RegionColorMode color;
         bool restart;
+        bool window = false;
     };
     using B = BlackBarDetectionMode;
     using C = RegionColorMode;
@@ -78,7 +81,10 @@ int main(int argc, char** argv)
         Scenario{true, false, 15, B::Limited21x9, C::Mean, false},
         Scenario{false, false, 15, B::Limited21x9, C::Dominant, false},
         Scenario{true, true, 30, B::Off, C::Mean, true},
-        Scenario{false, false, 60, B::Off, C::Mean, true}};
+        Scenario{false, false, 60, B::Off, C::Mean, true},
+        Scenario{true, false, 60, B::Off, C::Mean, false, true},
+        Scenario{true, true, 30, B::Off, C::Mean, false, true},
+        Scenario{true, false, 30, B::Off, C::Mean, true, true}};
     int phase = 0;
     int frameCount = 0;
     quint64 lastFrame = 0;
@@ -86,17 +92,32 @@ int main(int argc, char** argv)
     std::vector<double> processingTimes;
     bool transitioning = false;
     bool awaitingStart = false;
+    bool awaitingClosed = false;
+    bool awaitingStaticFrame = false;
+    quint64 finalStopRequest = 0;
+    bool stopAcknowledged = false;
     QTimer watchdog;
     watchdog.setSingleShot(true);
+    QObject::connect(&worker, &ScreenCaptureWorker::stopped, &app, [&](quint64 request) {
+        if (request != finalStopRequest || finalStopRequest == 0) return;
+        stopAcknowledged = true;
+        std::cout << "Asynchronous stop acknowledged after source release\n";
+        QTimer::singleShot(150, &app, [&] { watchdog.stop(); app.quit(); });
+    });
     QObject::connect(&watchdog, &QTimer::timeout, &app, [&] {
         std::cerr << "No frame in phase " << phase << '\n';
-        app.exit(1);
+        // A driver teardown failure must fail the test, not leave it hanging
+        // in destructors after the UI message loop has already stopped.
+        ExitProcess(1);
     });
     const auto configure = [&] {
         std::cerr << "Starting phase " << phase << std::endl;
         const auto& scenario = scenarios[phase];
         if (scenario.restart) worker.stop();
         configuration.useWindowsGraphicsCapture = scenario.wgc;
+        configuration.sourceWindow = scenario.window ? static_cast<quintptr>(window.winId()) : 0;
+        configuration.sourceWindowProcessId = scenario.window ? GetCurrentProcessId() : 0;
+        if (phase == 11) window.resize(620, 240);
         configuration.gamingMode = scenario.gaming;
         configuration.targetFps = scenario.fps;
         configuration.blackBarDetectionMode = scenario.bars;
@@ -115,15 +136,45 @@ int main(int argc, char** argv)
             std::cerr << "Status: " << status.message.toStdString() << std::endl;
             if (status.state == CaptureState::Running) awaitingStart = false;
             if (status.state == CaptureState::Error) {
+                if (awaitingClosed && status.nativeError == static_cast<qint64>(
+                    static_cast<quint32>(HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE)))) {
+                    std::cout << "Closed WGC source stops without desktop fallback\n";
+                    finalStopRequest = worker.stop();
+                    return;
+                }
                 std::cerr << status.message.toStdString() << '\n';
                 app.exit(1);
             }
         });
     QObject::connect(&worker, &ScreenCaptureWorker::sampleReady,
         &app, [&](const CaptureSample& sample) {
+            if (stopAcknowledged) {
+                std::cerr << "Frame delivered after stop acknowledgement\n";
+                app.exit(1);
+                return;
+            }
+            if (awaitingStaticFrame) {
+                if (sample.frameSize.width() < 640) return;
+                awaitingStaticFrame = false;
+                awaitingClosed = true;
+                std::cout << "Final static window frame read back after animation stopped\n";
+                window.close();
+                window.destroy();
+                watchdog.start(15000);
+                return;
+            }
             if (transitioning || awaitingStart) return;
+            // WGC can still have a pre-resize frame queued. The watchdog
+            // requires the new size to arrive; do not count old frames.
+            if (phase >= 11 && sample.frameSize.width() < 600) return;
             const QRect frameBounds(QPoint{}, sample.frameSize);
             const QRect content = sample.contentInsets.contentRect(sample.frameSize);
+            if (configuration.sourceWindow != 0
+                && (sample.frameSize.width() > 700 || sample.frameSize.height() > 340)) {
+                std::cerr << "Window capture returned monitor size or failed to resize\n";
+                app.exit(1);
+                return;
+            }
             if (!sample.frameSize.isValid() || sample.colors.size() != 80
                 || content.isEmpty() || !frameBounds.contains(content)
                 || sample.frameNumber <= lastFrame
@@ -157,8 +208,11 @@ int main(int argc, char** argv)
             transitioning = true;
             watchdog.stop();
             if (++phase == static_cast<int>(scenarios.size())) {
-                worker.stop();
-                app.quit();
+                awaitingStaticFrame = true;
+                animation.stop();
+                window.resize(640, 260);
+                window.render();
+                watchdog.start(15000);
                 return;
             }
             // Schedule outside sample delivery; the next generation discards

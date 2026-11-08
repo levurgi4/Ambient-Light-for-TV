@@ -23,6 +23,9 @@ struct WgcFrameSource::Impl {
     wgc::Direct3D11CaptureFrame frame{nullptr};
     graphics::SizeInt32 size{};
     int targetFps = 0;
+    HWND window = nullptr;
+    HMONITOR sourceMonitor = nullptr;
+    DWORD processId = 0;
     std::shared_ptr<std::atomic_bool> itemClosed;
 
     void setTargetFps(const int fps)
@@ -52,7 +55,8 @@ WgcFrameSource::~WgcFrameSource()
 }
 
 HRESULT WgcFrameSource::initialize(
-    ID3D11Device* device, HMONITOR monitor, const int targetFps, QString* error)
+    ID3D11Device* device, HMONITOR monitor, const int targetFps, QString* error,
+    HWND sourceWindow, DWORD sourceProcessId)
 {
     reset();
     try {
@@ -76,8 +80,23 @@ HRESULT WgcFrameSource::initialize(
         impl_->device = inspectable.as<directx::Direct3D11::IDirect3DDevice>();
         const auto interop = winrt::get_activation_factory<
             wgc::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
-        winrt::check_hresult(interop->CreateForMonitor(monitor,
-            winrt::guid_of<wgc::GraphicsCaptureItem>(), winrt::put_abi(impl_->item)));
+        if (sourceWindow) {
+            DWORD processId = 0;
+            if (!IsWindow(sourceWindow)
+                || !GetWindowThreadProcessId(sourceWindow, &processId)
+                || processId != sourceProcessId) {
+                if (error) *error = QStringLiteral("The selected window closed. Select the game window again.");
+                return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
+            }
+            winrt::check_hresult(interop->CreateForWindow(sourceWindow,
+                winrt::guid_of<wgc::GraphicsCaptureItem>(), winrt::put_abi(impl_->item)));
+            impl_->window = sourceWindow;
+            impl_->sourceMonitor = monitor;
+            impl_->processId = sourceProcessId;
+        } else {
+            winrt::check_hresult(interop->CreateForMonitor(monitor,
+                winrt::guid_of<wgc::GraphicsCaptureItem>(), winrt::put_abi(impl_->item)));
+        }
         impl_->itemClosed = std::make_shared<std::atomic_bool>(false);
         impl_->item.Closed([closed = impl_->itemClosed](auto&&, auto&&) {
             closed->store(true, std::memory_order_relaxed);
@@ -108,8 +127,24 @@ HRESULT WgcFrameSource::acquire(
     *texture = nullptr;
     releaseFrame();
     if (!impl_->pool) return E_UNEXPECTED;
+    DWORD processId = 0;
+    if (impl_->window && (!IsWindow(impl_->window)
+        || !GetWindowThreadProcessId(impl_->window, &processId)
+        || processId != impl_->processId)) {
+        if (error) *error = QStringLiteral("The selected window closed. Select the game window again.");
+        return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
+    }
     if (impl_->itemClosed && impl_->itemClosed->load(std::memory_order_relaxed)) {
+        if (impl_->window) {
+            if (error) *error = QStringLiteral("The selected capture window closed. Select it again.");
+            return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
+        }
         return DXGI_ERROR_ACCESS_LOST;
+    }
+    if (impl_->window && IsIconic(impl_->window)) return DXGI_ERROR_WAIT_TIMEOUT;
+    if (impl_->window && MonitorFromWindow(impl_->window, MONITOR_DEFAULTTONEAREST) != impl_->sourceMonitor) {
+        if (error) *error = QStringLiteral("The game moved to another display. Select its window again.");
+        return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
     }
     try {
         impl_->setTargetFps(targetFps);
@@ -128,10 +163,10 @@ HRESULT WgcFrameSource::acquire(
         }
         if (size.Width != impl_->size.Width || size.Height != impl_->size.Height) {
             releaseFrame();
-            impl_->pool.Recreate(impl_->device,
-                directx::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
-            impl_->size = size;
-            return DXGI_ERROR_WAIT_TIMEOUT;
+            // Recreate the whole source through the existing recovery path.
+            // Recreate(pool) alone may leave a resized but now static window
+            // without a fresh full-size frame until it paints again.
+            return DXGI_ERROR_ACCESS_LOST;
         }
         const auto surface = impl_->frame.Surface().as<
             Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
@@ -169,6 +204,9 @@ void WgcFrameSource::reset() noexcept
     impl_->itemClosed.reset();
     impl_->device = nullptr;
     impl_->targetFps = 0;
+    impl_->window = nullptr;
+    impl_->sourceMonitor = nullptr;
+    impl_->processId = 0;
     impl_->size = {};
 }
 

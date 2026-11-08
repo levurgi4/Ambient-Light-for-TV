@@ -139,6 +139,12 @@ private:
     void updateDiagnostics();
     void updateEnabledState();
     void refreshCaptureOutputs();
+    void selectCaptureWindow();
+    quintptr captureWindowHandle_ = 0;
+    quint32 captureWindowProcessId_ = 0;
+    QString captureWindowTitle_;
+    QPushButton* captureWindowButton_ = nullptr;
+    QPushButton* mirrorCaptureWindowButton_ = nullptr;
     void applyCaptureOutputs(
         const QVector<capture::CaptureOutput>& outputs,
         const QString& errorMessage);
@@ -192,6 +198,9 @@ private:
     Language language_ = Language::Russian;
     bool exiting_ = false;
     bool exitFinished_ = false;
+    bool exitTransportReady_ = false;
+    bool exitCaptureReady_ = false;
+    quint64 exitCaptureStopRequest_ = 0;
     bool trayNoticeShown_ = false;
     bool applyingSettings_ = false;
     QHash<QWidget*, QSize> tabWindowSizes_;
@@ -248,6 +257,9 @@ private:
     QWidget* mirrorPage_ = nullptr;
     MirrorWindow* mirrorWindow_ = nullptr;
     bool mirrorRunning_ = false;
+    capture::CapturePipelineStatistics capturePipelineStatistics_;
+    bool mirrorStopping_ = false;
+    quint64 mirrorStopRequest_ = 0;
     QComboBox* mirrorSourceCombo_ = nullptr;
     QComboBox* mirrorTargetCombo_ = nullptr;
     QComboBox* mirrorMethodCombo_ = nullptr;

@@ -20,9 +20,11 @@ public:
 protected:
     void paintEvent(QPaintEvent*) override {} // Direct3D owns the entire surface.
     void closeEvent(QCloseEvent* event) override {
-        if (stopRequested) stopRequested();
-        // The callback synchronously releases D3D ownership. Do not veto
-        // QApplication::quit or a Windows close request afterwards.
+        if (stopRequested && isVisible()) {
+            event->ignore();
+            stopRequested(); // Hidden by the UI after the asynchronous stop acknowledgement.
+            return;
+        }
         event->accept();
     }
 };

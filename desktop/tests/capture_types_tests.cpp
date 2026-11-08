@@ -1,6 +1,7 @@
 #include "capture/capture_output_selection.hpp"
 #include "capture/capture_types.hpp"
 #include "capture/mirror_geometry.hpp"
+#include "led_output_ownership.hpp"
 
 #include <QString>
 
@@ -49,6 +50,30 @@ bool testValidConfigurationAndLayout()
         configuration.samplingLayout() == expected,
         "sampling layout follows configured sides");
     success &= expect(expected.ledCount() == 300, "sampling layout LED total");
+    return success;
+}
+
+bool testWindowCaptureConfiguration()
+{
+    for (int flags = 0; flags < 32; ++flags) {
+        const bool actual = ambilight::mayClearCaptureLedOutput(
+            flags & 1, flags & 2, flags & 4, flags & 8, flags & 16);
+        if (!expect(actual == (flags == 1), "capture clears only its own LED output")) return false;
+    }
+    ambilight::capture::CaptureConfiguration configuration;
+    configuration.sourceWindow = 123;
+    bool success = expectInvalid(configuration, "window capture requires process identity and WGC");
+    configuration.sourceWindowProcessId = 42;
+    success &= expectInvalid(configuration, "DXGI cannot capture a selected window");
+    configuration.useWindowsGraphicsCapture = true;
+    success &= expectValid(configuration, "WGC window source is valid");
+    configuration.mirrorWindow = 123;
+    configuration.mirrorOutputId = QStringLiteral("TV");
+    success &= expectInvalid(configuration, "window cannot mirror itself");
+    configuration.mirrorWindow = 456;
+    success &= expectValid(configuration, "window source can share capture with mirror");
+    configuration.sourceWindow = 0;
+    success &= expectInvalid(configuration, "orphaned process identity is invalid");
     return success;
 }
 
@@ -507,6 +532,7 @@ bool testMirrorGeometryAndCadence()
 int main()
 {
     const bool success = testValidConfigurationAndLayout()
+        && testWindowCaptureConfiguration()
         && testMirrorGeometryAndCadence()
         && testGamingPerimeterCopies()
         && testLedBoundaries()

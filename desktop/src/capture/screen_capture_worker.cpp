@@ -1102,6 +1102,7 @@ enum class FrameResult {
     Sampled,
     WaitTimeout,
     AccessLost,
+    SourceClosed,
     Failed
 };
 
@@ -1110,12 +1111,26 @@ struct CapturedFrame final {
     QSize frameSize;
     CaptureInsets contentInsets;
     QVector<QRgb> colors;
+    QSize colorFrameSize;
+    CaptureInsets colorInsets;
+    qint64 colorTimestamp = 0;
+    bool sourceFrame = false;
+    bool sourcePolled = false;
+    bool gpuPending = false;
     HRESULT error = S_OK;
     bool mirrored = false;
     QString errorMessage;
 };
 
 class GpuCaptureBackend final {
+    struct ReadbackSlot {
+        ComPtr<ID3D11Buffer> buffer;
+        bool pending = false;
+        CaptureConfiguration configuration;
+        QSize frameSize;
+        CaptureInsets insets;
+        qint64 timestamp = 0;
+    };
 public:
     ~GpuCaptureBackend() { reset(); }
 
@@ -1134,6 +1149,21 @@ public:
         }
         selectedOutput_ = selection->description;
         useWgc_ = configuration.useWindowsGraphicsCapture;
+        if (configuration.sourceWindow != 0) {
+            const HWND source = reinterpret_cast<HWND>(configuration.sourceWindow);
+            DWORD processId = 0;
+            DXGI_OUTPUT_DESC output{};
+            selection->output->GetDesc(&output);
+            if (!IsWindow(source) || !GetWindowThreadProcessId(source, &processId)
+                || processId != configuration.sourceWindowProcessId) {
+                return failInitialization(QStringLiteral("The selected game window closed. Select it again."),
+                    HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE), errorMessage, nativeResult);
+            }
+            if (MonitorFromWindow(source, MONITOR_DEFAULTTONEAREST) != output.Monitor) {
+                return failInitialization(QStringLiteral("The game moved to another display. Select its window again."),
+                    E_INVALIDARG, errorMessage, nativeResult);
+            }
+        }
         if (configuration.mirrorWindow != 0) {
             auto target = selectDxgiOutput(configuration.mirrorOutputId, errorMessage, nativeResult);
             if (!target) return false;
@@ -1217,7 +1247,8 @@ public:
                 result = selection->output->GetDesc(&description);
                 if (SUCCEEDED(result)) {
                     result = wgc_.initialize(
-                        device_.Get(), description.Monitor, configuration.captureFps(), errorMessage);
+                        device_.Get(), description.Monitor, configuration.captureFps(), errorMessage,
+                        reinterpret_cast<HWND>(configuration.sourceWindow), configuration.sourceWindowProcessId);
                 }
             }
         } else {
@@ -1273,6 +1304,9 @@ public:
         mirror_.reset();
         mirrorTargetMonitor_ = nullptr;
         mirrorSourceRect_ = {};
+        // Submit outstanding copies and release context bindings before WGC
+        // waits for its producer to stop (also when no mirror was initialized).
+        if (context_) { context_->ClearState(); context_->Flush(); }
         wgc_.reset();
         useWgc_ = false;
         releaseDuplicationFrame();
@@ -1283,7 +1317,10 @@ public:
         sampleWidth_ = 0;
         sampleHeight_ = 0;
         sampleFormat_ = DXGI_FORMAT_UNKNOWN;
-        stagingBuffer_.Reset();
+        probeReadback_ = {};
+        colorReadback_ = {};
+        pendingColorSample_ = false;
+        sampleTimestamp_ = 0;
         resultBuffer_.Reset();
         resultView_.Reset();
         parameterBuffer_.Reset();
@@ -1303,6 +1340,13 @@ public:
         const bool mirrorDue)
     {
         CapturedFrame captured;
+        if (!consumeReadbacks(configuration, detector, captured)) return captured;
+        if (!sampleColors && !mirrorDue) {
+            // Drain readback, but leave a final source update in the capture pool
+            // until a consumer is due. Never acquire and silently discard it.
+            captured.result = captured.colors.isEmpty() ? FrameResult::WaitTimeout : FrameResult::Sampled;
+            return captured;
+        }
         if (configuration.mirrorWindow != 0) {
             const HWND window = reinterpret_cast<HWND>(configuration.mirrorWindow);
             RECT bounds{};
@@ -1329,6 +1373,7 @@ public:
         // at the display's rate while we are sleeping (not our target FPS).
         // Release immediately before reacquiring, as recommended by DXGI.
         const HRESULT releaseResult = releaseDuplicationFrame();
+        captured.sourcePolled = true;
         const HRESULT acquireResult = useWgc_
             ? wgc_.acquire(desktopTexture.GetAddressOf(), configuration.captureFps(),
                 &captured.errorMessage)
@@ -1336,6 +1381,8 @@ public:
             : duplication_->AcquireNextFrame(0, &frameInformation,
                   desktopResource.GetAddressOf());
         if (acquireResult == DXGI_ERROR_WAIT_TIMEOUT) {
+            if (sampleColors && pendingColorSample_ && sampleTexture_)
+                queueColorSample(configuration, detector);
             // Retry the final desktop image if the TV was busy, even after
             // the source becomes static. Only one GPU image is retained.
             if (mirrorDue && mirrorPending_ && sampleView_) {
@@ -1356,7 +1403,13 @@ public:
                     return captured;
                 }
             }
-            captured.result = FrameResult::WaitTimeout;
+            captured.result = captured.colors.isEmpty() ? FrameResult::WaitTimeout : FrameResult::Sampled;
+            captured.error = acquireResult;
+            return captured;
+        }
+        if (configuration.sourceWindow != 0
+            && acquireResult == HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE)) {
+            captured.result = FrameResult::SourceClosed;
             captured.error = acquireResult;
             return captured;
         }
@@ -1380,6 +1433,7 @@ public:
         }
 
         duplicationFrameHeld_ = !useWgc_;
+        captured.sourceFrame = true;
         struct FrameReleaseGuard final {
             WgcFrameSource* wgc = nullptr;
             ~FrameReleaseGuard()
@@ -1425,6 +1479,7 @@ public:
             detector.reset();
             lastFrameSize_ = captured.frameSize;
             mirrorPending_ = false;
+            pendingColorSample_ = false;
         }
 
         bool mirrorReady = false;
@@ -1436,11 +1491,6 @@ public:
                 return captured;
             }
         }
-        if (!sampleColors && !mirrorDue) {
-            captured.result = FrameResult::Sampled;
-            return captured;
-        }
-
         if (!mirrorDue && !mirrorPending_
             && configuration.blackBarDetectionMode == BlackBarDetectionMode::Off) {
             const int depth = resolvedSamplingDepthPixels(
@@ -1461,6 +1511,9 @@ public:
             context_->CopyResource(sampleTexture_.Get(), desktopTexture.Get());
         }
         if (mirrorDue) mirrorPending_ = true;
+        sampleTimestamp_ = QDateTime::currentMSecsSinceEpoch();
+        sampleConfiguration_ = configuration;
+        pendingColorSample_ = configuration.processLedColors;
 
         if (mirrorReady) {
             result = mirror_.present(sampleView_.Get(), captured.frameSize,
@@ -1475,81 +1528,23 @@ public:
         if (!sampleColors) {
             // A queued copy without Present/Map still needs to be submitted
             // before returning the borrowed capture surface to its producer.
-            if (mirrorPending_) context_->Flush();
+            context_->Flush();
             captured.result = FrameResult::Sampled;
             return captured;
         }
 
         ShaderParameters parameters =
             makeParameters(configuration, sourceDescription, captured.frameSize);
-        const BlackBarSearchLimits searchLimits = blackBarSearchLimits(
-            configuration.blackBarDetectionMode,
-            captured.frameSize,
-            configuration.maximumBlackBarFraction);
-
         if (configuration.blackBarDetectionMode
                 != BlackBarDetectionMode::Off
-            && (runBlackBarProbe || frameSizeChanged)) {
+            && (runBlackBarProbe || frameSizeChanged) && !probeReadback_.pending) {
             parameters.mode = 0;
             parameters.resultCount = kProbeResultCount;
-            std::array<quint32, kProbeResultCount> probes{};
-            if (!dispatch(
-                    parameters,
-                    probes.data(),
-                    static_cast<UINT>(probes.size()),
-                    &captured.errorMessage,
-                    &result)) {
-                captured.error = result;
-                return captured;
-            }
-            detector.update(
-                probes,
-                captured.frameSize,
-                configuration.blackLuminanceThreshold,
-                searchLimits);
+            dispatch(parameters, probeReadback_, configuration, captured.frameSize, {});
         }
-
-        captured.contentInsets =
-            configuration.blackBarDetectionMode
-                != BlackBarDetectionMode::Off
-            ? detector.insets()
-            : CaptureInsets{};
-        parameters.insetLeft =
-            static_cast<UINT>(captured.contentInsets.left);
-        parameters.insetTop =
-            static_cast<UINT>(captured.contentInsets.top);
-        parameters.insetRight =
-            static_cast<UINT>(captured.contentInsets.right);
-        parameters.insetBottom =
-            static_cast<UINT>(captured.contentInsets.bottom);
-        parameters.samplingDepth = static_cast<UINT>(
-            resolvedSamplingDepthPixels(
-                captured.frameSize,
-                captured.contentInsets,
-                configuration.samplingDepthPixels));
-        parameters.depthSampleCount = static_cast<UINT>(
-            configuration.gamingMode ? kGamingDepthSamples : adaptiveDepthSampleCount(
-                static_cast<int>(parameters.samplingDepth)));
-        parameters.mode = 1;
-        parameters.resultCount =
-            static_cast<UINT>(configuration.ledCount());
-
-        std::array<quint32, kMaximumLedCount> encodedColors{};
-        if (!dispatch(
-                parameters,
-                encodedColors.data(),
-                parameters.resultCount,
-                &captured.errorMessage,
-                &result)) {
-            captured.error = result;
-            return captured;
-        }
-
-        captured.colors.resize(configuration.ledCount());
-        for (int index = 0; index < configuration.ledCount(); ++index) {
-            captured.colors[index] = static_cast<QRgb>(
-                encodedColors[static_cast<std::size_t>(index)]);
-        }
+        pendingColorSample_ = true;
+        queueColorSample(configuration, detector);
+        context_->Flush();
         captured.result = FrameResult::Sampled;
         captured.error = S_OK;
         return captured;
@@ -1706,10 +1701,9 @@ private:
         stagingDescription.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         stagingDescription.MiscFlags = 0;
         stagingDescription.StructureByteStride = 0;
-        result = device_->CreateBuffer(
-            &stagingDescription,
-            nullptr,
-            stagingBuffer_.GetAddressOf());
+        result = device_->CreateBuffer(&stagingDescription, nullptr, probeReadback_.buffer.GetAddressOf());
+        if (SUCCEEDED(result))
+            result = device_->CreateBuffer(&stagingDescription, nullptr, colorReadback_.buffer.GetAddressOf());
         if (FAILED(result)) {
             return bufferFailure(
                 QStringLiteral("CreateBuffer(readback)"),
@@ -1873,12 +1867,10 @@ private:
         }
     }
 
-    [[nodiscard]] bool dispatch(
+    void dispatch(
         const ShaderParameters& parameters,
-        quint32* destination,
-        const UINT resultCount,
-        QString* errorMessage,
-        HRESULT* nativeResult)
+        ReadbackSlot& slot, const CaptureConfiguration& configuration,
+        const QSize frameSize, const CaptureInsets insets)
     {
         context_->UpdateSubresource(
             parameterBuffer_.Get(),
@@ -1896,7 +1888,7 @@ private:
         context_->CSSetShaderResources(0, 1, &sampleView);
         context_->CSSetUnorderedAccessViews(0, 1, &resultView, nullptr);
         context_->Dispatch(
-            (resultCount + kShaderThreads - 1U) / kShaderThreads,
+            (parameters.resultCount + kShaderThreads - 1U) / kShaderThreads,
             1,
             1);
 
@@ -1912,31 +1904,82 @@ private:
         context_->CSSetConstantBuffers(0, 1, &nullConstantBuffer);
         context_->CSSetShader(nullptr, nullptr, 0);
 
-        context_->CopyResource(stagingBuffer_.Get(), resultBuffer_.Get());
-        D3D11_MAPPED_SUBRESOURCE mapped{};
-        const HRESULT result = context_->Map(
-            stagingBuffer_.Get(),
-            0,
-            D3D11_MAP_READ,
-            0,
-            &mapped);
-        if (FAILED(result)) {
-            if (errorMessage != nullptr) {
-                *errorMessage = QStringLiteral("GPU result readback failed: %1")
-                                    .arg(hresultText(result));
-            }
-            if (nativeResult != nullptr) {
-                *nativeResult = result;
-            }
-            return false;
-        }
+        context_->CopyResource(slot.buffer.Get(), resultBuffer_.Get());
+        slot.pending = true;
+        slot.configuration = configuration;
+        slot.frameSize = frameSize;
+        slot.insets = insets;
+        slot.timestamp = sampleTimestamp_;
+    }
 
-        std::memcpy(
-            destination,
-            mapped.pData,
-            static_cast<std::size_t>(resultCount) * sizeof(quint32));
-        context_->Unmap(stagingBuffer_.Get(), 0);
+    bool consumeReadbacks(const CaptureConfiguration& configuration,
+        BlackBarDetector& detector, CapturedFrame& captured)
+    {
+        for (ReadbackSlot* slot : {&probeReadback_, &colorReadback_}) {
+            if (!slot->pending) continue;
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            const HRESULT result = context_->Map(slot->buffer.Get(), 0,
+                D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+            if (result == DXGI_ERROR_WAS_STILL_DRAWING) {
+                captured.gpuPending = true;
+                continue;
+            }
+            if (FAILED(result)) {
+                captured.error = result;
+                captured.errorMessage = QStringLiteral("GPU readback failed: %1").arg(hresultText(result));
+                return false;
+            }
+            slot->pending = false;
+            // Discard old settings/geometry results, never apply them to a new layout.
+            if (slot->configuration == configuration && slot->frameSize == lastFrameSize_
+                && configuration.processLedColors) {
+                if (slot == &probeReadback_) {
+                    std::array<quint32, kProbeResultCount> probes{};
+                    std::memcpy(probes.data(), mapped.pData, sizeof(probes));
+                    detector.update(probes, slot->frameSize, configuration.blackLuminanceThreshold,
+                        blackBarSearchLimits(configuration.blackBarDetectionMode, slot->frameSize,
+                            configuration.maximumBlackBarFraction));
+                    // Re-sample the retained final image even if the desktop went idle.
+                    pendingColorSample_ = true;
+                } else {
+                    captured.colors.resize(configuration.ledCount());
+                    std::memcpy(captured.colors.data(), mapped.pData,
+                        captured.colors.size() * sizeof(QRgb));
+                    captured.colorFrameSize = slot->frameSize;
+                    captured.colorInsets = slot->insets;
+                    captured.colorTimestamp = slot->timestamp;
+                }
+            }
+            context_->Unmap(slot->buffer.Get(), 0);
+        }
         return true;
+    }
+
+    void queueColorSample(const CaptureConfiguration& configuration, BlackBarDetector& detector)
+    {
+        if (sampleConfiguration_ != configuration) {
+            pendingColorSample_ = false;
+            return; // Retained border strips may not cover the new sampling settings.
+        }
+        if (colorReadback_.pending) return; // One pending result, never an unbounded GPU queue.
+        D3D11_TEXTURE2D_DESC description{};
+        sampleTexture_->GetDesc(&description);
+        ShaderParameters parameters = makeParameters(configuration, description, lastFrameSize_);
+        const CaptureInsets insets = configuration.blackBarDetectionMode == BlackBarDetectionMode::Off
+            ? CaptureInsets{} : detector.insets();
+        parameters.insetLeft = static_cast<UINT>(insets.left);
+        parameters.insetTop = static_cast<UINT>(insets.top);
+        parameters.insetRight = static_cast<UINT>(insets.right);
+        parameters.insetBottom = static_cast<UINT>(insets.bottom);
+        parameters.samplingDepth = static_cast<UINT>(resolvedSamplingDepthPixels(
+            lastFrameSize_, insets, configuration.samplingDepthPixels));
+        parameters.depthSampleCount = static_cast<UINT>(configuration.gamingMode
+            ? kGamingDepthSamples : adaptiveDepthSampleCount(static_cast<int>(parameters.samplingDepth)));
+        parameters.mode = 1;
+        parameters.resultCount = static_cast<UINT>(configuration.ledCount());
+        dispatch(parameters, colorReadback_, configuration, lastFrameSize_, insets);
+        pendingColorSample_ = false;
+        context_->Flush();
     }
 
     CaptureOutput selectedOutput_;
@@ -1957,7 +2000,10 @@ private:
     ComPtr<ID3D11Buffer> parameterBuffer_;
     ComPtr<ID3D11Buffer> resultBuffer_;
     ComPtr<ID3D11UnorderedAccessView> resultView_;
-    ComPtr<ID3D11Buffer> stagingBuffer_;
+    ReadbackSlot probeReadback_, colorReadback_;
+    bool pendingColorSample_ = false;
+    qint64 sampleTimestamp_ = 0;
+    CaptureConfiguration sampleConfiguration_;
     ComPtr<ID3D11Texture2D> sampleTexture_;
     ComPtr<ID3D11ShaderResourceView> sampleView_;
     UINT sampleWidth_ = 0;
@@ -2075,6 +2121,8 @@ public:
 
         const bool backendChanged = configuration.useWindowsGraphicsCapture
             != configuration_.useWindowsGraphicsCapture
+            || configuration.sourceWindow != configuration_.sourceWindow
+            || configuration.sourceWindowProcessId != configuration_.sourceWindowProcessId
             || configuration.mirrorWindow != configuration_.mirrorWindow
             || configuration.mirrorOutputId != configuration_.mirrorOutputId;
         colorGate_ = {};
@@ -2144,6 +2192,11 @@ private:
                 CaptureState::Error,
                 errorMessage,
                 result);
+            if (configuration_.sourceWindow != 0
+                && result == HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE)) {
+                runningRequested_ = false;
+                return;
+            }
             schedule(kRetryDelayMs);
             return;
         }
@@ -2186,6 +2239,9 @@ private:
         const bool mirrorDue = configuration_.mirrorWindow != 0 && mirrorGate_.due(frameStartedNanoseconds);
         CapturedFrame captured =
             backend_.capture(configuration_, detector_, runProbe, colorsDue, mirrorDue);
+        if (colorsDue) colorGate_.advance(frameStartedNanoseconds, configuration_.targetFps);
+        if (mirrorDue) mirrorGate_.advance(frameStartedNanoseconds, configuration_.mirrorFps);
+        recordPipelineStatistics(captured, mirrorDue, processingClock.nsecsElapsed() / 1'000'000.0);
 
         if (captured.result == FrameResult::WaitTimeout) {
             if (lastFrameClock_.isValid()
@@ -2198,6 +2254,13 @@ private:
             return;
         }
 
+        if (captured.result == FrameResult::SourceClosed) {
+            // Do not retry a closed HWND: Windows may reuse it for another window.
+            runningRequested_ = false;
+            publishStatus(CaptureState::Error, captured.errorMessage, captured.error);
+            backend_.reset();
+            return;
+        }
         if (captured.result == FrameResult::AccessLost) {
             backend_.reset();
             selectedOutputId_.clear();
@@ -2224,28 +2287,11 @@ private:
             return;
         }
 
-        lastFrameClock_.restart();
-        if (mirrorDue) {
-            mirrorGate_.advance(frameStartedNanoseconds, configuration_.mirrorFps);
-            if (captured.mirrored) ++mirrorPresented_; else ++mirrorSkipped_;
-            if (!mirrorStatsClock_.isValid() || mirrorStatsClock_.elapsed() >= 500) {
-                mirrorStatsClock_.start();
-                const QPointer<ScreenCaptureWorker> owner = owner_;
-                const quint64 generation = configurationGeneration_;
-                const auto presented = mirrorPresented_, skipped = mirrorSkipped_;
-                const double milliseconds = processingClock.nsecsElapsed() / 1'000'000.0;
-                QMetaObject::invokeMethod(owner_.data(), [owner, generation, presented, skipped, milliseconds] {
-                    if (owner && owner->commandGeneration_.load(std::memory_order_relaxed) == generation)
-                        emit owner->mirrorStatistics(presented, skipped, milliseconds);
-                }, Qt::QueuedConnection);
-            }
-        }
         if (captured.colors.isEmpty()) {
             publishStatus(CaptureState::Running, QStringLiteral("Desktop capture is running."));
             schedule(nextFrameDelay(frameStartedNanoseconds));
             return;
         }
-        colorGate_.advance(frameStartedNanoseconds, configuration_.targetFps);
         ++frameNumber_;
         updateFps();
 
@@ -2253,21 +2299,55 @@ private:
         sample.colors = std::move(captured.colors);
         sample.samplingLayout = configuration_.samplingLayout();
         sample.configurationGeneration = configurationGeneration_;
-        sample.frameSize = captured.frameSize;
-        sample.contentInsets = captured.contentInsets;
+        sample.frameSize = captured.colorFrameSize;
+        sample.contentInsets = captured.colorInsets;
         sample.framesPerSecond = measuredFps_;
         sample.processingMilliseconds =
             static_cast<double>(processingClock.nsecsElapsed())
             / 1'000'000.0;
         sample.frameNumber = frameNumber_;
-        sample.capturedAtMilliseconds =
-            QDateTime::currentMSecsSinceEpoch();
+        sample.capturedAtMilliseconds = captured.colorTimestamp;
         postSample(std::move(sample));
         publishStatus(
             CaptureState::Running,
             QStringLiteral("Desktop capture is running."));
 
         schedule(nextFrameDelay(frameStartedNanoseconds));
+    }
+
+    void recordPipelineStatistics(const CapturedFrame& frame, const bool mirrorDue, const double milliseconds)
+    {
+        if (!pipelineClock_.isValid()) pipelineClock_.start();
+        if (frame.sourceFrame) {
+            ++pipelineStats_.sourceFrames;
+            ++sourceFramesInWindow_;
+            lastFrameClock_.restart();
+        } else if (frame.sourcePolled
+            && (frame.result == FrameResult::WaitTimeout || frame.result == FrameResult::Sampled)) {
+            ++pipelineStats_.noFramePolls;
+        }
+        if (frame.gpuPending) ++pipelineStats_.gpuBusyPolls;
+        if (frame.mirrored) {
+            ++pipelineStats_.submittedFrames;
+            ++submittedFramesInWindow_;
+        } else if (mirrorDue && frame.sourceFrame) {
+            ++pipelineStats_.outputBusyFrames;
+        }
+        pipelineStats_.lastProcessingMilliseconds = milliseconds;
+        pipelineStats_.sourceAgeMilliseconds = lastFrameClock_.isValid() ? lastFrameClock_.elapsed() : -1;
+        const qint64 elapsed = pipelineClock_.elapsed();
+        if (elapsed < 500) return;
+        pipelineStats_.sourceFps = sourceFramesInWindow_ * 1000.0 / elapsed;
+        pipelineStats_.submittedFps = submittedFramesInWindow_ * 1000.0 / elapsed;
+        pipelineClock_.restart();
+        sourceFramesInWindow_ = submittedFramesInWindow_ = 0;
+        const auto statistics = pipelineStats_;
+        const auto generation = configurationGeneration_;
+        const QPointer<ScreenCaptureWorker> owner = owner_;
+        QMetaObject::invokeMethod(owner_.data(), [owner, generation, statistics] {
+            if (owner && owner->commandGeneration_.load(std::memory_order_relaxed) == generation)
+                emit owner->pipelineStatistics(statistics);
+        }, Qt::QueuedConnection);
     }
 
     void updateFps()
@@ -2340,8 +2420,9 @@ private:
     {
         colorGate_ = {};
         mirrorGate_ = {};
-        mirrorPresented_ = mirrorSkipped_ = 0;
-        mirrorStatsClock_.invalidate();
+        pipelineStats_ = {};
+        pipelineClock_.invalidate();
+        sourceFramesInWindow_ = submittedFramesInWindow_ = 0;
         frameNumber_ = 0;
         framesSinceFpsUpdate_ = 0;
         measuredFps_ = 0.0;
@@ -2467,8 +2548,9 @@ private:
     quint64 lastStatusGeneration_ = 0;
     QElapsedTimer fpsClock_;
     CaptureRateGate colorGate_, mirrorGate_;
-    quint64 mirrorPresented_ = 0, mirrorSkipped_ = 0;
-    QElapsedTimer mirrorStatsClock_;
+    CapturePipelineStatistics pipelineStats_;
+    QElapsedTimer pipelineClock_;
+    quint64 sourceFramesInWindow_ = 0, submittedFramesInWindow_ = 0;
     QElapsedTimer lastFrameClock_;
     QElapsedTimer pacingClock_;
     quint64 frameNumber_ = 0;
@@ -2511,11 +2593,16 @@ ScreenCaptureWorker::~ScreenCaptureWorker()
             runtime_,
             [runtime = runtime_, generation] {
                 runtime->stopCapture(generation);
+                QThread::currentThread()->quit();
             },
-            Qt::BlockingQueuedConnection);
+            Qt::QueuedConnection);
     }
-    captureThread_.quit();
-    captureThread_.wait();
+    // Normal UI shutdown already awaits stopped(). During destruction keep
+    // servicing native synchronous DXGI messages without re-entering Qt slots.
+    while (!captureThread_.wait(10)) {
+        MSG message{};
+        PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE);
+    }
     runtime_ = nullptr;
 }
 
@@ -2540,23 +2627,24 @@ void ScreenCaptureWorker::start()
         Qt::QueuedConnection);
 }
 
-void ScreenCaptureWorker::stop()
+quint64 ScreenCaptureWorker::stop()
 {
     if (runtime_ == nullptr || !captureThread_.isRunning()) {
-        return;
+        return 0;
     }
     const quint64 generation =
         commandGeneration_.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (QThread::currentThread() == &captureThread_) {
-        runtime_->stopCapture(generation);
-        return;
-    }
+    const QPointer<ScreenCaptureWorker> owner(this);
     QMetaObject::invokeMethod(
         runtime_,
-        [runtime = runtime_, generation] {
+        [runtime = runtime_, generation, owner] {
             runtime->stopCapture(generation);
+            if (owner) QMetaObject::invokeMethod(owner.data(), [owner, generation] {
+                if (owner) emit owner->stopped(generation);
+            }, Qt::QueuedConnection);
         },
-        Qt::BlockingQueuedConnection);
+        Qt::QueuedConnection);
+    return generation;
 }
 
 void ScreenCaptureWorker::updateConfiguration(

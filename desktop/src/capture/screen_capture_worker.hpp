@@ -33,16 +33,18 @@ public:
 
 public slots:
     void start();
-    void stop();
+    // Non-blocking. The matching acknowledgement is sent after D3D releases HWNDs.
+    quint64 stop();
     void updateConfiguration(
         const ambilight::capture::CaptureConfiguration& configuration);
 
 signals:
+    void stopped(quint64 request);
     void sampleReady(const ambilight::capture::CaptureSample& sample);
     void statusChanged(const ambilight::capture::CaptureStatus& status);
     void outputsChanged(
         const QVector<ambilight::capture::CaptureOutput>& outputs);
-    void mirrorStatistics(quint64 presented, quint64 skipped, double processingMilliseconds);
+    void pipelineStatistics(const ambilight::capture::CapturePipelineStatistics& statistics);
 
 private:
     friend class ScreenCaptureRuntime;

@@ -1,5 +1,6 @@
 #include "main_window.hpp"
 #include "mirror_window.hpp"
+#include "led_output_ownership.hpp"
 #include "capture/mirror_geometry.hpp"
 
 #include "autostart.hpp"
@@ -28,6 +29,7 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QKeyCombination>
 #include <QKeySequenceEdit>
 #include <QLabel>
@@ -401,12 +403,16 @@ MainWindow::MainWindow(QWidget* parent)
 
 MainWindow::~MainWindow()
 {
-    stopCapture();
+    exiting_ = true;
+    qApp->removeNativeEventFilter(this);
+    unregisterGlobalHotkey();
+    mirrorWindow_->stopRequested = {};
+    // Keep the native TV window alive until the capture thread has exited.
+    delete captureWorker_;
+    captureWorker_ = nullptr;
     delete mirrorWindow_;
     stopAudio();
     stopTransport();
-    qApp->removeNativeEventFilter(this);
-    unregisterGlobalHotkey();
 }
 
 void MainWindow::buildUi()
@@ -587,7 +593,10 @@ void MainWindow::buildScreenTab()
     captureMethodCombo_ = new QComboBox(screenSourceGroup_);
     addComboItem(captureMethodCombo_, QStringLiteral("dxgi"));
     addComboItem(captureMethodCombo_, QStringLiteral("wgc"));
+    addComboItem(captureMethodCombo_, QStringLiteral("wgc_window"));
     sourceForm->addRow(captureMethodLabel_, captureMethodCombo_);
+    captureWindowButton_ = new QPushButton(screenSourceGroup_);
+    sourceForm->addRow(QString(), captureWindowButton_);
     captureMethodHintLabel_ = new QLabel(screenSourceGroup_);
     captureMethodHintLabel_->setWordWrap(true);
     sourceForm->addRow(QString(), captureMethodHintLabel_);
@@ -727,11 +736,14 @@ void MainWindow::buildMirrorTab()
     mirrorMethodCombo_ = new QComboBox(mirrorPage_);
     mirrorMethodCombo_->addItem(QStringLiteral("DXGI Desktop Duplication"), QStringLiteral("dxgi"));
     mirrorMethodCombo_->addItem(QStringLiteral("Windows Graphics Capture"), QStringLiteral("wgc"));
+    mirrorMethodCombo_->addItem(QString(), QStringLiteral("wgc_window"));
     mirrorFpsSpin_ = makeSpinBox(mirrorPage_, 15, 60, QStringLiteral(" FPS"));
     mirrorFpsSpin_->setValue(60);
     form->addRow(mirrorSourceLabel_, mirrorSourceCombo_);
     form->addRow(mirrorTargetLabel_, mirrorTargetCombo_);
     form->addRow(mirrorMethodLabel_, mirrorMethodCombo_);
+    mirrorCaptureWindowButton_ = new QPushButton(mirrorPage_);
+    form->addRow(QString(), mirrorCaptureWindowButton_);
     form->addRow(mirrorFpsLabel_, mirrorFpsSpin_);
     layout->addLayout(form);
     auto* buttons = new QHBoxLayout();
@@ -757,6 +769,19 @@ void MainWindow::buildMirrorTab()
 
 void MainWindow::updateMirrorUi()
 {
+    const bool mirrorBusy = mirrorRunning_ || mirrorStopping_;
+    const bool windowCapture = comboValue(captureMethodCombo_) == QStringLiteral("wgc_window");
+    const QString windowButtonText = captureWindowHandle_ == 0
+        ? text("Select game window…", "Выбрать окно игры…")
+        : text("Window: %1 — change…", "Окно: %1 — изменить…").arg(captureWindowTitle_.left(48));
+    for (auto* button : {captureWindowButton_, mirrorCaptureWindowButton_}) {
+        button->setText(windowButtonText);
+        button->setToolTip(captureWindowTitle_);
+        button->setVisible(windowCapture);
+        button->setEnabled(!mirrorBusy);
+    }
+    captureMethodCombo_->setItemText(2, text("WGC — game window", "WGC — окно игры"));
+    mirrorMethodCombo_->setItemText(2, text("WGC — game window", "WGC — окно игры"));
     tabs_->setTabText(tabs_->indexOf(mirrorPage_), text("Mirroring", "Зеркалирование"));
     mirrorHintLabel_->setText(text(
         "Experimental mirror without blur. Works without lighting or ESP32. Select Extend with Win+P first. "
@@ -774,10 +799,13 @@ void MainWindow::updateMirrorUi()
     mirrorStartButton_->setText(mirrorRunning_ ? text("Stop", "Остановить") : text("Start mirror", "Запустить зеркало"));
     mirrorRefreshButton_->setText(text("Refresh displays", "Обновить экраны"));
     mirrorHelpButton_->setText(text("Help", "Справка"));
-    mirrorSourceCombo_->setEnabled(!mirrorRunning_);
-    mirrorTargetCombo_->setEnabled(!mirrorRunning_);
-    captureOutputCombo_->setEnabled(!mirrorRunning_);
-    mirrorRefreshButton_->setEnabled(!mirrorRunning_);
+    mirrorSourceCombo_->setEnabled(!mirrorBusy && !windowCapture);
+    mirrorTargetCombo_->setEnabled(!mirrorBusy);
+    captureOutputCombo_->setEnabled(!mirrorBusy && !windowCapture);
+    mirrorRefreshButton_->setEnabled(!mirrorBusy);
+    mirrorStartButton_->setEnabled(!mirrorStopping_ && !exiting_);
+    mirrorMethodCombo_->setEnabled(!mirrorStopping_);
+    captureMethodCombo_->setEnabled(!mirrorStopping_);
     if (stopMirrorAction_) {
         stopMirrorAction_->setText(text("Stop TV mirror", "Остановить зеркало ТВ"));
         stopMirrorAction_->setEnabled(mirrorRunning_);
@@ -789,7 +817,15 @@ void MainWindow::updateMirrorUi()
 
 void MainWindow::toggleMirror(const bool enabled)
 {
+    if (mirrorStopping_ || exiting_) return;
     if (!enabled) { stopMirror(); return; }
+    if (comboValue(captureMethodCombo_) == QStringLiteral("wgc_window")
+        && captureWindowHandle_ == 0) {
+        const QSignalBlocker blocker(mirrorStartButton_);
+        mirrorStartButton_->setChecked(false);
+        mirrorStatusLabel_->setText(text("Select the game window first.", "Сначала выберите окно игры."));
+        return;
+    }
     const auto* source = capture::resolveCaptureOutput(captureOutputs_, comboValue(captureOutputCombo_));
     const auto* target = capture::resolveCaptureOutput(captureOutputs_, comboValue(mirrorTargetCombo_));
     if (!source || !target || !capture::separateMirrorOutputs(*source, *target)) {
@@ -824,16 +860,16 @@ void MainWindow::toggleMirror(const bool enabled)
 
 void MainWindow::stopMirror()
 {
-    if (!mirrorRunning_) return;
-    // Release the HWND's swap chain on its owning worker before hiding it.
-    stopCapture();
+    if (!mirrorRunning_ || mirrorStopping_) return;
+    // Keep processing UI/native messages until the worker releases its swap chain.
+    captureUpdateTimer_->stop();
     mirrorRunning_ = false;
-    mirrorWindow_->hide();
+    mirrorStopping_ = true;
+    mirrorStopRequest_ = captureWorker_->stop();
     const QSignalBlocker blocker(mirrorStartButton_);
     mirrorStartButton_->setChecked(false);
-    mirrorStatusLabel_->setText(text("Mirror stopped.", "Зеркало остановлено."));
+    mirrorStatusLabel_->setText(text("Stopping mirror…", "Остановка зеркала…"));
     updateMirrorUi();
-    if (!exiting_) updateCaptureConfiguration();
 }
 
 void MainWindow::buildAudioTab()
@@ -1213,8 +1249,24 @@ void MainWindow::buildTray()
 
 void MainWindow::connectSignals()
 {
+    connect(captureWorker_, &capture::ScreenCaptureWorker::stopped, this, [this](quint64 request) {
+        if (mirrorStopping_ && request == mirrorStopRequest_) {
+            mirrorStopping_ = false;
+            mirrorWindow_->hide();
+            if (mirrorStatusLabel_->text() == text("Stopping mirror…", "Остановка зеркала…"))
+                mirrorStatusLabel_->setText(text("Mirror stopped.", "Зеркало остановлено."));
+            updateMirrorUi();
+            if (!exiting_) updateCaptureConfiguration();
+        }
+        if (exiting_ && request == exitCaptureStopRequest_) {
+            exitCaptureReady_ = true;
+            if (exitTransportReady_) finishExit();
+        }
+    });
     connect(mirrorStartButton_, &QPushButton::toggled, this, &MainWindow::toggleMirror);
     connect(mirrorRefreshButton_, &QPushButton::clicked, this, &MainWindow::refreshCaptureOutputs);
+    connect(captureWindowButton_, &QPushButton::clicked, this, &MainWindow::selectCaptureWindow);
+    connect(mirrorCaptureWindowButton_, &QPushButton::clicked, this, &MainWindow::selectCaptureWindow);
     connect(mirrorSourceCombo_, &QComboBox::currentIndexChanged, this, [this](int index) {
         if (!mirrorRunning_) captureOutputCombo_->setCurrentIndex(index);
     });
@@ -1241,12 +1293,21 @@ void MainWindow::connectSignals()
             "Изменение конфигурации экранов останавливает его для безопасности. Сравните FPS игры и задержку на ТВ с режимом «Дублировать»."));
     });
     if (stopMirrorAction_) connect(stopMirrorAction_, &QAction::triggered, this, &MainWindow::stopMirror);
-    connect(captureWorker_, &capture::ScreenCaptureWorker::mirrorStatistics, this,
-        [this](quint64 presented, quint64 skipped, double milliseconds) {
+    connect(captureWorker_, &capture::ScreenCaptureWorker::pipelineStatistics, this,
+        [this](const capture::CapturePipelineStatistics& statistics) {
+            capturePipelineStatistics_ = statistics;
             if (mirrorRunning_) mirrorStatusLabel_->setText(text(
-                "Presented: %1 · skipped (output busy): %2 · last capture/processing: %3 ms (not TV latency)",
-                "Выведено: %1 · пропущено (вывод занят): %2 · последний захват/обработка: %3 мс (не задержка ТВ)")
-                .arg(presented).arg(skipped).arg(milliseconds, 0, 'f', 2));
+                "Source: %1 FPS · submitted to Windows: %2 FPS (not measured TV FPS)\n"
+                "Submitted: %3 · output busy: %4 · no new frame: %5 polls · GPU busy: %6 polls\n"
+                "Source age: %7 ms · last processing: %8 ms (not TV latency)",
+                "Источник: %1 FPS · передано Windows: %2 FPS (не замер FPS телевизора)\n"
+                "Передано: %3 · вывод занят: %4 · нет нового кадра: %5 проверок · GPU занят: %6 проверок\n"
+                "Возраст кадра: %7 мс · последняя обработка: %8 мс (не задержка ТВ)")
+                .arg(statistics.sourceFps, 0, 'f', 1).arg(statistics.submittedFps, 0, 'f', 1)
+                .arg(statistics.submittedFrames).arg(statistics.outputBusyFrames)
+                .arg(statistics.noFramePolls).arg(statistics.gpuBusyPolls)
+                .arg(statistics.sourceAgeMilliseconds).arg(statistics.lastProcessingMilliseconds, 0, 'f', 2));
+            updateDiagnostics();
         });
     connect(tabs_, &QTabWidget::currentChanged, this, [this] {
         updateWindowSizeForCurrentTab();
@@ -1410,6 +1471,8 @@ void MainWindow::connectSignals()
     });
 
     connect(captureMethodCombo_, &QComboBox::currentIndexChanged, this, [this] {
+        if (mirrorRunning_ && comboValue(captureMethodCombo_) == QStringLiteral("wgc_window")
+            && captureWindowHandle_ == 0) stopMirror();
         clearCapturedFrame();
         updateDiagnostics();
         scheduleCaptureUpdate();
@@ -2704,7 +2767,7 @@ The software current limit does not replace a fuse, correctly sized wiring, or p
         helpText = english
             ? QString::fromUtf8(R"HELP(This read-only page helps verify the system or prepare a bug report.
 
-• Source, FPS, and GPU/readback show whether capture is running and keeping up.
+• Source FPS and GPU-busy polls show whether capture is keeping up. Processing time is CPU-side, not GPU execution time.
 
 • Transport TX shows communication with the ESP32. Replaced frames are not always an error: an outdated pending frame is intentionally replaced to keep latency low.
 
@@ -2715,7 +2778,7 @@ The software current limit does not replace a fuse, correctly sized wiring, or p
 • Copy places the complete report on the clipboard. Review the listed COM port name before sharing it.)HELP")
             : QString::fromUtf8(R"HELP(Эта вкладка доступна только для чтения и помогает проверить систему или подготовить сообщение об ошибке.
 
-• Источник, FPS и GPU/чтение показывают, работает ли захват и успевает ли обработка.
+• FPS источника и проверки занятости GPU показывают, успевает ли захват. Время обработки измеряется на CPU, это не время выполнения GPU.
 
 • Передача показывает обмен с ESP32. «Заменено кадров» не всегда означает ошибку: устаревший кадр намеренно заменяется свежим, чтобы не росла задержка.
 
@@ -2932,12 +2995,12 @@ void MainWindow::updateSamplingDepthUi()
     captureMethodCombo_->setItemText(0, QStringLiteral("DXGI Desktop Duplication"));
     captureMethodCombo_->setItemText(1, QStringLiteral("Windows Graphics Capture"));
     captureMethodHintLabel_->setText(text(
-        "If a game freezes DXGI capture, try Windows Graphics Capture and "
-        "select the game's display explicitly. Windows may show a capture border. "
-        "Game mode works with either method; capture overhead can differ.",
-        "Если DXGI не видит игру, попробуйте Windows Graphics Capture и явно "
-        "выберите экран с игрой. Windows может показывать рамку захвата. "
-        "Игровой режим работает с обоими способами; нагрузка может отличаться."));
+        "WGC — game window captures the selected application instead of the whole monitor. "
+        "Start the game, select its window, and keep it restored. Select it again after restarting "
+        "or moving the game to another display. Windows may show a capture border.",
+        "«WGC — окно игры» захватывает выбранное приложение, а не весь монитор. "
+        "Запустите игру, выберите её окно и не сворачивайте его. После перезапуска игры "
+        "или переноса на другой экран выберите окно заново. Windows может показывать рамку захвата."));
     const bool gaming = gamingModeCheck_->isChecked();
     gamingModeCheck_->setText(text("Game mode (lower GPU load)",
         "Игровой режим (меньше нагрузка на GPU)"));
@@ -3227,6 +3290,16 @@ void MainWindow::updateDiagnostics()
                .arg(captureState)
         << text("Capture method: %1", "Способ захвата: %1")
                .arg(captureMethodCombo_->currentText())
+        << text("Capture pipeline: source %1 FPS / submitted %2 FPS; no-frame polls %3 / GPU-busy polls %4; source age %5 ms",
+                "Конвейер захвата: источник %1 FPS / передано %2 FPS; без кадра %3 / GPU занят %4 проверок; возраст кадра %5 мс")
+               .arg(capturePipelineStatistics_.sourceFps, 0, 'f', 1)
+               .arg(capturePipelineStatistics_.submittedFps, 0, 'f', 1)
+               .arg(capturePipelineStatistics_.noFramePolls).arg(capturePipelineStatistics_.gpuBusyPolls)
+               .arg(capturePipelineStatistics_.sourceAgeMilliseconds)
+        << text("WGC window: %1", "Окно WGC: %1")
+               .arg(comboValue(captureMethodCombo_) == QStringLiteral("wgc_window")
+                    ? (captureWindowHandle_ ? captureWindowTitle_ : text("not selected", "не выбрано"))
+                    : text("monitor capture", "захват монитора"))
         << text("Last capture error this session: %1", "Последняя ошибка захвата за сеанс: %1")
                .arg(lastCaptureError_.isEmpty() ? text("none", "нет") : lastCaptureError_)
         << text("Source: %1 × %2; target %3 FPS",
@@ -3239,8 +3312,8 @@ void MainWindow::updateDiagnostics()
         << text("Game mode: %1", "Игровой режим: %1")
                .arg(gamingModeCheck_->isChecked()
                     ? text("enabled", "включён") : text("disabled", "выключен"))
-        << text("Measured: %1 FPS; GPU/readback %2 ms; frame %3",
-               "Измерено: %1 FPS; GPU/чтение %2 мс; кадр %3")
+        << text("LED results: %1 FPS; CPU capture/processing %2 ms; frame %3",
+               "Результаты LED: %1 FPS; захват/обработка на CPU %2 мс; кадр %3")
                .arg(measuredCaptureFps_, 0, 'f', 1)
                .arg(captureProcessingMilliseconds_, 0, 'f', 2)
                .arg(capturedFrameNumber_)
@@ -3681,6 +3754,90 @@ void MainWindow::updateConnectionShortcut()
                 "Open connection settings.",
                 "Открыть настройки подключения.")
             : transportStatus_.message);
+}
+
+void MainWindow::selectCaptureWindow()
+{
+    if (mirrorRunning_ || mirrorStopping_) return;
+    struct WindowChoice { HWND handle; DWORD processId; QString title; };
+    std::vector<WindowChoice> windows;
+    EnumWindows([](HWND window, LPARAM choices) -> BOOL {
+        DWORD processId = 0;
+        GetWindowThreadProcessId(window, &processId);
+        if (!IsWindowVisible(window) || GetWindow(window, GW_OWNER)
+            || (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOOLWINDOW)
+            || processId == 0 || processId == GetCurrentProcessId()) return TRUE;
+        const int length = GetWindowTextLengthW(window);
+        if (length <= 0) return TRUE;
+        std::wstring title(static_cast<size_t>(length) + 1, L'\0');
+        const int copied = GetWindowTextW(window, title.data(), static_cast<int>(title.size()));
+        if (copied <= 0) return TRUE;
+        reinterpret_cast<std::vector<WindowChoice>*>(choices)->push_back(
+            {window, processId, QString::fromWCharArray(title.data(), copied)});
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&windows));
+    std::sort(windows.begin(), windows.end(), [](const auto& a, const auto& b) {
+        return a.title.compare(b.title, Qt::CaseInsensitive) < 0;
+    });
+    if (windows.empty()) {
+        QMessageBox::information(this, text("Window capture", "Захват окна"),
+            text("No application windows found. Start the game and try again.",
+                 "Окна приложений не найдены. Запустите игру и попробуйте снова."));
+        return;
+    }
+    QStringList labels;
+    for (const auto& window : windows) {
+        labels.append(QStringLiteral("%1 [PID %2, HWND %3]").arg(window.title)
+            .arg(window.processId).arg(reinterpret_cast<quintptr>(window.handle), 0, 16));
+    }
+    QInputDialog dialog(this);
+    dialog.setWindowTitle(text("Select game window", "Выбор окна игры"));
+    dialog.setLabelText(text("WGC captures this window for both lighting and TV.\n"
+        "Keep the game on the source monitor; do not minimize it.",
+        "WGC захватит это окно для подсветки и ТВ.\n"
+        "Оставьте игру на исходном мониторе и не сворачивайте её."));
+    dialog.setComboBoxItems(labels);
+    dialog.setComboBoxEditable(false);
+    dialog.resize(640, dialog.sizeHint().height());
+    if (dialog.exec() != QDialog::Accepted) return;
+    const int index = labels.indexOf(dialog.textValue());
+    if (index < 0) return;
+    const auto& selected = windows[static_cast<size_t>(index)];
+    DWORD processId = 0;
+    MONITORINFOEXW monitor{};
+    monitor.cbSize = sizeof(monitor);
+    if (!IsWindow(selected.handle)
+        || !GetWindowThreadProcessId(selected.handle, &processId)
+        || processId != selected.processId
+        || !GetMonitorInfoW(MonitorFromWindow(selected.handle, MONITOR_DEFAULTTONEAREST), &monitor)) {
+        QMessageBox::warning(this, text("Window capture", "Захват окна"),
+            text("The window is no longer available. Select it again.",
+                 "Окно больше недоступно. Выберите его заново."));
+        return;
+    }
+    refreshCaptureOutputs();
+    const QString display = QString::fromWCharArray(monitor.szDevice);
+    QString sourceId;
+    for (const auto& output : captureOutputs_) {
+        if (output.legacyId.compare(display, Qt::CaseInsensitive) == 0) {
+            sourceId = output.id;
+            break;
+        }
+    }
+    if (sourceId.isEmpty()) {
+        QMessageBox::warning(this, text("Window capture", "Захват окна"),
+            text("The window's display is unavailable.", "Экран выбранного окна недоступен."));
+        return;
+    }
+    stopCapture();
+    captureWindowHandle_ = reinterpret_cast<quintptr>(selected.handle);
+    captureWindowProcessId_ = selected.processId;
+    captureWindowTitle_ = selected.title;
+    selectComboValue(captureOutputCombo_, sourceId);
+    clearCapturedFrame();
+    updateMirrorUi();
+    updateCaptureConfiguration();
+    scheduleSave();
 }
 
 void MainWindow::refreshCaptureOutputs()
@@ -4474,7 +4631,7 @@ bool MainWindow::captureShouldBeActive() const
 
 void MainWindow::updateCaptureConfiguration()
 {
-    if (captureWorker_ == nullptr || exiting_) {
+    if (captureWorker_ == nullptr || exiting_ || mirrorStopping_) {
         return;
     }
 
@@ -4531,8 +4688,21 @@ void MainWindow::updateCaptureConfiguration()
         configuration.mirrorFps = mirrorFpsSpin_->value();
     }
     configuration.outputId = comboValue(captureOutputCombo_);
+    const bool windowCapture = comboValue(captureMethodCombo_) == QStringLiteral("wgc_window");
+    if (windowCapture && captureWindowHandle_ == 0) {
+        captureWorker_->stop();
+        clearCapturedFrame();
+        captureStatusText_ = text("Select a game window for WGC capture.", "Выберите окно игры для захвата WGC.");
+        ledPreview_->setStatus(captureStatusText_, false);
+        updateDiagnostics();
+        return;
+    }
+    if (windowCapture) {
+        configuration.sourceWindow = captureWindowHandle_;
+        configuration.sourceWindowProcessId = captureWindowProcessId_;
+    }
     configuration.useWindowsGraphicsCapture =
-        comboValue(captureMethodCombo_) == QStringLiteral("wgc");
+        windowCapture || comboValue(captureMethodCombo_) == QStringLiteral("wgc");
     configuration.topLedCount = samplingLayout.top;
     configuration.rightLedCount = samplingLayout.right;
     configuration.bottomLedCount = samplingLayout.bottom;
@@ -4573,10 +4743,13 @@ void MainWindow::updateCaptureConfiguration()
 
 void MainWindow::clearCapturedFrame(const bool clearLedOutput)
 {
+    // Capture configuration never owns the frame of another active LED mode.
+    const bool clearOwnedOutput = mayClearCaptureLedOutput(clearLedOutput, audioShouldBeActive(),
+        testWhiteBalanceButton_->isChecked(), layoutTestButton_->isChecked(), manualAnimationButton_->isChecked());
     previewRefreshTimer_->stop();
     const int previousSamplingDepth = effectiveSamplingDepthPixels();
     ledFrameFilter_.reset();
-    if (clearLedOutput) {
+    if (clearOwnedOutput) {
         lastLogicalLedColors_.clear();
         lastLedFrame_.clear();
     }
@@ -4590,7 +4763,7 @@ void MainWindow::clearCapturedFrame(const bool clearLedOutput)
     }
     ledPreview_->clearFrame();
     updateSamplingOverlay();
-    if (clearLedOutput && transportWorker_ != nullptr) {
+    if (clearOwnedOutput && transportWorker_ != nullptr) {
         transportWorker_->clearPendingLedFrame();
     }
 }
@@ -4712,6 +4885,13 @@ void MainWindow::handleCaptureSample(const capture::CaptureSample& sample)
 
 void MainWindow::handleCaptureStatus(const capture::CaptureStatus& status)
 {
+    if (status.state == capture::CaptureState::Error
+        && status.nativeError == static_cast<qint64>(static_cast<quint32>(HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE)))) {
+        captureWindowHandle_ = 0;
+        captureWindowProcessId_ = 0;
+        captureWindowTitle_.clear();
+        updateMirrorUi();
+    }
     if (mirrorRunning_ && status.state == capture::CaptureState::Error) {
         stopMirror();
         mirrorStatusLabel_->setText(text("Mirror error: %1", "Ошибка зеркала: %1").arg(status.message));
@@ -4871,7 +5051,9 @@ void MainWindow::exitApplication()
     exiting_ = true;
     stopMirror();
     saveSettings(false);
-    stopCapture();
+    captureUpdateTimer_->stop();
+    exitCaptureStopRequest_ = captureWorker_->stop();
+    exitCaptureReady_ = exitCaptureStopRequest_ == 0;
     stopAudio();
     unregisterGlobalHotkey();
     if (trayIcon_ != nullptr) {
@@ -4892,9 +5074,11 @@ void MainWindow::exitApplication()
 
 void MainWindow::finishExit()
 {
-    if (exitFinished_) {
+    if (!exiting_ || exitFinished_) {
         return;
     }
+    exitTransportReady_ = true;
+    if (!exitCaptureReady_) return;
     exitFinished_ = true;
     stopTransport();
     qApp->quit();

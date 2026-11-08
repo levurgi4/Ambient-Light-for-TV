@@ -96,4 +96,4 @@ jobs:
           gh release create "${{ github.ref_name }}" @assets `
             --verify-tag `
             --title "Ambilight by Levurgi4 ${{ github.ref_name }}" `
-            --generate-notes
+            --notes-file "docs/releases/${{ github.ref_name }}.md"

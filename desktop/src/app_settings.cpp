@@ -101,7 +101,8 @@ void AppSettings::normalize()
     screenHeight = std::clamp(screenHeight, 240, 16'384);
     targetFps = std::clamp(targetFps, 1, 240);
     if (captureMethod != QStringLiteral("dxgi")
-        && captureMethod != QStringLiteral("wgc")) {
+        && captureMethod != QStringLiteral("wgc")
+        && captureMethod != QStringLiteral("wgc_window")) {
         captureMethod = QStringLiteral("dxgi");
     }
     samplingZones = std::clamp(samplingZones, 4, 300);

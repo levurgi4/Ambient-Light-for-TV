@@ -206,6 +206,9 @@ struct SamplingLayout final {
 struct CaptureConfiguration final {
     QString outputId;
     bool useWindowsGraphicsCapture = false;
+    // Session-only identity: never persist/reopen an arbitrary HWND on startup.
+    quintptr sourceWindow = 0;
+    quint32 sourceWindowProcessId = 0;
     bool processLedColors = true;
     // Native HWND owned by the UI. Mirroring is never restored automatically.
     quintptr mirrorWindow = 0;
@@ -256,6 +259,13 @@ struct CaptureConfiguration final {
             topLedCount, rightLedCount, bottomLedCount, leftLedCount};
         if (mirrorFps < 15 || mirrorFps > 60) {
             return reject(QStringLiteral("Mirror FPS must be between 15 and 60."));
+        }
+        if ((sourceWindow == 0) != (sourceWindowProcessId == 0)
+            || (sourceWindow != 0 && !useWindowsGraphicsCapture)) {
+            return reject(QStringLiteral("Window capture requires WGC and a selected window/process."));
+        }
+        if (sourceWindow != 0 && sourceWindow == mirrorWindow) {
+            return reject(QStringLiteral("Cannot capture the mirror window itself."));
         }
         if (mirrorWindow != 0 && mirrorOutputId.trimmed().isEmpty()) {
             return reject(QStringLiteral("Select an explicit mirror destination."));
@@ -334,6 +344,18 @@ struct CaptureConfiguration final {
         const CaptureConfiguration&) = default;
 };
 
+struct CapturePipelineStatistics final {
+    quint64 sourceFrames = 0;
+    quint64 submittedFrames = 0;
+    quint64 outputBusyFrames = 0;
+    quint64 noFramePolls = 0;
+    quint64 gpuBusyPolls = 0;
+    double sourceFps = 0;
+    double submittedFps = 0;
+    double lastProcessingMilliseconds = 0;
+    qint64 sourceAgeMilliseconds = -1;
+};
+
 struct CaptureSample final {
     // Canonical clockwise perimeter:
     // top L->R, right T->B, bottom R->L, left B->T.
@@ -377,5 +399,6 @@ Q_DECLARE_METATYPE(ambilight::capture::BlackBarDetectionMode)
 Q_DECLARE_METATYPE(ambilight::capture::SamplingLayout)
 Q_DECLARE_METATYPE(ambilight::capture::CaptureConfiguration)
 Q_DECLARE_METATYPE(ambilight::capture::CaptureSample)
+Q_DECLARE_METATYPE(ambilight::capture::CapturePipelineStatistics)
 Q_DECLARE_METATYPE(ambilight::capture::CaptureState)
 Q_DECLARE_METATYPE(ambilight::capture::CaptureStatus)

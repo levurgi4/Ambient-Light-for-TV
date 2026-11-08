@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    project(AmbilightDesktop VERSION 0.2.10 LANGUAGES CXX)
+    project(AmbilightDesktop VERSION 0.2.11 LANGUAGES CXX)
     include(CTest)
 endif()
 
@@ -32,6 +32,7 @@ qt_add_executable(ambilight_desktop WIN32
     src/capture/mirror_geometry.hpp
     src/led_frame_filter.cpp
     src/led_frame_filter.hpp
+    src/led_output_ownership.hpp
     src/led_preview_widget.cpp
     src/led_preview_widget.hpp
     src/main.cpp

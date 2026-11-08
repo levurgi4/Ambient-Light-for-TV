@@ -60,6 +60,20 @@ bool testDefaults()
         && expect(settings.ambientTimeoutMs == 1000, "default stream timeout");
 }
 
+bool testWindowCaptureMethodPersistence()
+{
+    QTemporaryDir directory;
+    if (!directory.isValid()) return false;
+    QSettings storage(directory.filePath(QStringLiteral("window.ini")), QSettings::IniFormat);
+    ambilight::AppSettings settings;
+    settings.captureMethod = QStringLiteral("wgc_window");
+    if (!settings.save(storage)) return false;
+    const auto restored = ambilight::AppSettings::load(storage);
+    return expect(restored.captureMethod == QStringLiteral("wgc_window"), "WGC window method survives restart")
+        && expect(!storage.contains(QStringLiteral("sourceWindow")), "HWND is not persisted")
+        && expect(!storage.contains(QStringLiteral("sourceWindowProcessId")), "process identity is not persisted");
+}
+
 bool testNormalization()
 {
     ambilight::AppSettings settings;
@@ -434,6 +448,7 @@ bool testCurrentLimitAccountsForIdleDraw()
 int main()
 {
     const bool success = testDefaults()
+        && testWindowCaptureMethodPersistence()
         && testNormalization()
         && testRoundTrip()
         && testOversizedLayoutNormalization()

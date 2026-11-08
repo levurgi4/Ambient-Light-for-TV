@@ -13,7 +13,7 @@ public:
     WgcFrameSource();
     ~WgcFrameSource();
     HRESULT initialize(ID3D11Device* device, HMONITOR monitor, int targetFps,
-        QString* error);
+        QString* error, HWND sourceWindow = nullptr, DWORD sourceProcessId = 0);
     HRESULT acquire(ID3D11Texture2D** texture, int targetFps, QString* error);
     void releaseFrame() noexcept;
     void reset() noexcept;
